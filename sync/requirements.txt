@@ -1,0 +1,2 @@
+authzed==1.25.0
+psycopg[binary]==3.2.13

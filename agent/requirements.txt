@@ -1,0 +1,4 @@
+anthropic==0.69.0
+psycopg[binary]==3.2.13
+requests==2.32.3
+authzed==1.25.0

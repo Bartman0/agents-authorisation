@@ -1,0 +1,133 @@
+# =============================================================================
+# Agent authorization demo
+#
+#   Keycloak  — issues user tokens + does on-behalf-of token exchange
+#   SpiceDB   — authoritative authorization model (who can view which account)
+#   sync      — materializes SpiceDB decisions into Postgres.resource_access
+#   Postgres  — business data + Row Level Security enforcing the projection
+#   agent     — Claude assistant, queries Postgres under the user's authority
+#
+# Bring the stack up:   docker compose up -d --build
+# Talk to the agent:    docker compose run --rm agent --user alice --password alice
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: finance
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finance"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q UP"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # One-shot: register the operation + service client scopes and assign them to
+  # the per-service agent clients.
+  keycloak-init:
+    build: ./keycloak
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: finance-demo
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    restart: "no"
+
+  spicedb:
+    image: authzed/spicedb:latest
+    command:
+      - "serve"
+      - "--grpc-preshared-key=supersecretkey"
+      - "--datastore-engine=memory"
+    ports:
+      - "50051:50051"
+
+  # One-shot: load SpiceDB schema + demo relationships, then exit.
+  spicedb-init:
+    build: ./sync
+    command: ["python", "bootstrap.py"]
+    environment:
+      SPICEDB_ENDPOINT: spicedb:50051
+      SPICEDB_TOKEN: supersecretkey
+    volumes:
+      - ./spicedb/schema.zed:/config/schema.zed:ro
+    depends_on:
+      - spicedb
+    restart: "no"
+
+  # Long-running: materialize SpiceDB -> Postgres.resource_access.
+  sync:
+    build: ./sync
+    command: ["python", "sync.py"]
+    environment:
+      SPICEDB_ENDPOINT: spicedb:50051
+      SPICEDB_TOKEN: supersecretkey
+      PGHOST: postgres
+      PGDATABASE: finance
+      PGUSER: syncer
+      PGPASSWORD: syncerpw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spicedb-init:
+        condition: service_completed_successfully
+
+  # Interactive; started on demand via `docker compose run`.
+  agent:
+    build: ./agent
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENT_MODEL: ${AGENT_MODEL:-claude-sonnet-5}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: finance-demo
+      PORTAL_CLIENT_ID: finance-portal
+      AGENT_TX_CLIENT_ID: finance-agent-transactions
+      AGENT_TX_CLIENT_SECRET: finance-agent-transactions-secret
+      AGENT_PAY_CLIENT_ID: finance-agent-payments
+      AGENT_PAY_CLIENT_SECRET: finance-agent-payments-secret
+      SPICEDB_ENDPOINT: spicedb:50051
+      SPICEDB_TOKEN: supersecretkey
+      PGHOST: postgres
+      PGDATABASE: finance
+      AGENT_PGUSER: agent
+      AGENT_PGPASSWORD: agentpw
+      AGENT_WRITER_PGUSER: agent_writer
+      AGENT_WRITER_PGPASSWORD: agentwriterpw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      keycloak-init:
+        condition: service_completed_successfully
+      spicedb:
+        condition: service_started
+    profiles: ["cli"]
+    stdin_open: true
+    tty: true

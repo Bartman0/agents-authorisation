@@ -1,0 +1,41 @@
+// =============================================================================
+// SpiceDB schema  —  the authoritative authorization model
+// =============================================================================
+// This is where row-level access is *defined*. Postgres RLS merely enforces a
+// materialized projection of what these permissions resolve to.
+//
+// Demo model:
+//   * A user owns accounts and may be a delegate on other accounts.
+//   * An organization has auditors who can view every account under it.
+// =============================================================================
+
+definition user {}
+
+// A caveat: a delegated payer may only pay up to `max_amount`. `amount` is
+// supplied at check time (the payment amount); `max_amount` is bound on the
+// relationship. This is the "data-subset / conditional" dimension.
+caveat within_limit(amount double, max_amount double) {
+    amount <= max_amount
+}
+
+definition organization {
+    relation auditor: user
+
+    // Anyone who can audit the org.
+    permission audit = auditor
+}
+
+definition account {
+    relation parent:   organization
+    relation owner:    user
+    relation delegate: user
+    // A limited payer is granted `pay` ONLY subject to the within_limit caveat.
+    relation limited_payer: user with within_limit
+
+    // view  -> owners, delegates, and auditors of the parent organization.
+    // manage-> owners only (edit/delete existing rows).
+    // pay   -> owners (unconditional) + limited payers (conditional on amount).
+    permission view   = owner + delegate + parent->audit
+    permission manage = owner
+    permission pay    = owner + limited_payer
+}

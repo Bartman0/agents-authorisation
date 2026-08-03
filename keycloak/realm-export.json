@@ -1,0 +1,115 @@
+{
+  "realm": "finance-demo",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 900,
+  "clients": [
+    {
+      "clientId": "finance-portal",
+      "name": "Finance Portal (user login)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "protocolMappers": [
+        {
+          "name": "audience-finance-agent-transactions",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "finance-agent-transactions",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "audience-finance-agent-payments",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "finance-agent-payments",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "finance-agent-transactions",
+      "name": "Agent identity for the transactions service (read-only)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "finance-agent-transactions-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "standard.token.exchange.enabled": "true",
+        "access.token.lifespan": "120"
+      }
+    },
+    {
+      "clientId": "finance-agent-payments",
+      "name": "Agent identity for the payments service (write)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "finance-agent-payments-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "standard.token.exchange.enabled": "true",
+        "access.token.lifespan": "120"
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@acme.test",
+      "firstName": "Alice",
+      "lastName": "Owner",
+      "credentials": [{ "type": "password", "value": "alice", "temporary": false }]
+    },
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bob@acme.test",
+      "firstName": "Bob",
+      "lastName": "Business",
+      "credentials": [{ "type": "password", "value": "bob", "temporary": false }]
+    },
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "username": "carol",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "carol@acme.test",
+      "firstName": "Carol",
+      "lastName": "Personal",
+      "credentials": [{ "type": "password", "value": "carol", "temporary": false }]
+    },
+    {
+      "id": "44444444-4444-4444-4444-444444444444",
+      "username": "dave",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "dave@acme.test",
+      "firstName": "Dave",
+      "lastName": "Auditor",
+      "credentials": [{ "type": "password", "value": "dave", "temporary": false }]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 # Agent authorization demo — SpiceDB → Postgres RLS, on behalf of a user
 
 A runnable demo of a pattern for **safely giving an AI agent database access**:
-the agent acts *as the human who invoked it*, and can only ever read the rows
+the agent acts _as the human who invoked it_, and can only ever read the rows
 that human is authorized to read — enforced by the database itself, not by the
 agent's good behavior.
 
@@ -10,7 +10,7 @@ agent's good behavior.
 - **Postgres Row Level Security** enforces those decisions on every query — a
   single indexed lookup, no per-query call to SpiceDB.
 - **Keycloak** authenticates the user and, via **token exchange**, issues the
-  agent a delegated token so it acts *on behalf of* the user.
+  agent a delegated token so it acts _on behalf of_ the user.
 - A **Claude agent** answers finance questions by querying Postgres behind that
   boundary.
 
@@ -64,11 +64,11 @@ docker compose logs -f sync       # wait for "initial reconciliation complete"
 This connects as the non-privileged `agent` DB role, switches `app.user_id`
 between the four users, and prints exactly what each can see. Expected:
 
-| User  | Accounts visible |
-|-------|------------------|
-| alice | 1, 2, 3          |
-| bob   | 3                |
-| carol | 4                |
+| User  | Accounts visible     |
+| ----- | -------------------- |
+| alice | 1, 2, 3              |
+| bob   | 3                    |
+| carol | 4                    |
 | dave  | 1, 2, 3, 4 (auditor) |
 
 ### Talk to the Claude agent
@@ -122,8 +122,8 @@ nothing, because RLS filtered the rows out before the agent ever saw them.
 
 ## Fit-for-purpose tokens
 
-The agent doesn't just prove *who* it acts for — it holds a token restricted to
-*what it may do*, along two independent dimensions:
+The agent doesn't just prove _who_ it acts for — it holds a token restricted to
+_what it may do_, along two independent dimensions:
 
 ```
 effective access  =  what the USER may do     (SpiceDB view/manage → RLS)
@@ -133,17 +133,16 @@ effective access  =  what the USER may do     (SpiceDB view/manage → RLS)
 
 A token can only ever narrow the user's authority (attenuation), never widen it,
 and the **LLM never chooses its own scope** — trusted orchestrator code maps each
-tool to the scopes it needs, Keycloak mints the token, and the resource servers
-+ Postgres enforce it.
+tool to the scopes it needs, Keycloak mints the token, and the resource servers + Postgres enforce it.
 
-**Just-in-time (JIT):** the user token is obtained once per session; then *every
-tool call* mints a fresh, short-TTL (120s) token scoped to just that call. This
+**Just-in-time (JIT):** the user token is obtained once per session; then _every
+tool call_ mints a fresh, short-TTL (120s) token scoped to just that call. This
 shrinks the blast radius if a token leaks mid-session.
 
 Each mint logs the **request** — the task, the client, and the exact scopes asked
 for (`[token-request] … requesting ONLY: finance:read, svc:transactions`) — and
-then an **`ENFORCEMENT POINT`** block contrasting *requested* vs *actually
-granted*, so the point where Keycloak caps the agent to the client's allowed
+then an **`ENFORCEMENT POINT`** block contrasting _requested_ vs _actually
+granted_, so the point where Keycloak caps the agent to the client's allowed
 scopes is explicit. An over-broad request (e.g. the payments client also asking
 for read scopes) is refused with a highlighted **`RESTRICTED`** block
 (`invalid_scope`, nothing granted). (`--debug` additionally prints the granted
@@ -151,19 +150,20 @@ token's raw JWT and claims.)
 
 **Per-service clients — each backend service trusts its own Keycloak client:**
 
-| Tool | Client used | Scopes requested | Token `aud` |
-|------|-------------|------------------|-------------|
+| Tool                 | Client used                  | Scopes requested                | Token `aud`            |
+| -------------------- | ---------------------------- | ------------------------------- | ---------------------- |
 | `query_transactions` | `finance-agent-transactions` | `finance:read svc:transactions` | `transactions-service` |
-| `make_payment`       | `finance-agent-payments`     | `finance:write svc:payments`   | `payments-service`     |
+| `make_payment`       | `finance-agent-payments`     | `finance:write svc:payments`    | `payments-service`     |
 
 Each client is capped by Keycloak to exactly its service's scopes. There is **no
 client that can reach both services** — the transactions client asking for
 `svc:payments` (or `finance:write`) fails with `invalid_scope`, and vice versa.
-So service isolation *and* the read/write ceiling are **enforced by Keycloak**,
+So service isolation _and_ the read/write ceiling are **enforced by Keycloak**,
 not merely by which tools the orchestrator exposes. The agent uses the matching
 per-service client for each tool call.
 
 **Enforcement points, all driven by the token:**
+
 - **Service (client)** — Keycloak won't mint a cross-service token at all.
 - **Service (aud)** — each tool is also a resource server that checks the
   token's `aud` (defence in depth); a transactions token is refused by payments.
@@ -192,7 +192,7 @@ the `sub`/`azp` that make it an on-behalf-of token.
 
 ## Conditional access — SpiceDB caveats (data-subset restriction)
 
-The three dimensions above are all boolean. The fourth restricts *how much* of a
+The three dimensions above are all boolean. The fourth restricts _how much_ of a
 resource the authority covers, using a **SpiceDB caveat** — a condition
 evaluated against runtime context. Here:
 
@@ -209,7 +209,7 @@ pays any amount.
 **This is the case that stresses the materialization model.** A caveat's answer
 depends on runtime context (the payment amount), so you can't pre-compute a
 boolean into `resource_access`. But this caveat has a special shape: its
-variable (`amount`) is a *column of the row being written* and its parameter
+variable (`amount`) is a _column of the row being written_ and its parameter
 (`max_amount`) is static. So we push it down:
 
 - the sync worker reads the caveat's bound `max_amount` from the relationship
@@ -218,7 +218,7 @@ variable (`amount`) is a *column of the row being written* and its parameter
   `max_amount IS NULL OR abs(amount) <= max_amount`.
 
 No per-payment SpiceDB call, still a hard DB boundary. `sync/check.py` calls
-SpiceDB `CheckPermission` *with the amount in context* to show the DB decision
+SpiceDB `CheckPermission` _with the amount in context_ to show the DB decision
 matches SpiceDB's authoritative caveat evaluation on every case.
 
 ```bash
@@ -230,15 +230,15 @@ docker compose run --rm agent --user alice --password alice --allow-write \
 ```
 
 **Precise reasons — a live check too.** The materialized RLS `WITH CHECK` is the
-hard boundary, but a generic RLS violation can't say *why* (no grant vs
+hard boundary, but a generic RLS violation can't say _why_ (no grant vs
 over-limit). So the payments service (`agent/spicedb.py`) also calls SpiceDB
 `CheckPermission` **with the amount in context** to produce a precise message —
 "amount exceeds your delegated payment limit" vs "not authorized to pay from
 this account" — before the RLS-guarded INSERT still enforces it. This is the
-hybrid in one path: *materialize what's static (fast, unbypassable), check live
-what's dynamic (authoritative, explainable).*
+hybrid in one path: _materialize what's static (fast, unbypassable), check live
+what's dynamic (authoritative, explainable)._
 
-**When the pushdown does *not* work at all:** if a caveat's context isn't a
+**When the pushdown does _not_ work at all:** if a caveat's context isn't a
 column of the written row (e.g. "only on weekdays", "only if an external risk
 score is low"), you can't materialize it — the live `CheckPermission` becomes
 the sole enforcement on the write path, with materialization still serving the
@@ -247,6 +247,7 @@ fast read path.
 ## How the pieces fit
 
 ### 1. Identity — `agent/identity.py`
+
 - The user logs in via Keycloak's direct-access grant on the public
   `finance-portal` client (stands in for a normal browser login).
 - Per tool call the agent — using the confidential per-service client for that
@@ -258,11 +259,13 @@ fast read path.
   own identity to widen access.
 
 ### 2. Authorization model — `spicedb/schema.zed` + `sync/fixtures.py`
+
 `view` = owners + delegates + org auditors (`parent->audit`); `manage` = owners
 (edit/delete); `pay` = owners + `limited_payer` (the latter caveated by
-`within_limit`). This is where access is *defined*, per permission.
+`within_limit`). This is where access is _defined_, per permission.
 
 ### 3. Materialization — `sync/sync.py`
+
 On startup and on every SpiceDB Watch event, the worker calls `LookupSubjects`
 for each materialized `(resource_type, permission)` — `account#view`,
 `account#manage`, `account#pay` — and upserts into `resource_access`. For `pay`
@@ -270,6 +273,7 @@ it also records `max_amount`: NULL for unconditional (owner) grants, and the
 caveat's bound limit (read via `ReadRelationships`) for conditional ones.
 
 ### 4. Enforcement — `postgres/init/02-rls.sql`
+
 Per-command RLS policies allow a row only if a matching `resource_access` row
 exists for `current_setting('app.user_id')`: `FOR SELECT` requires `view`,
 `FOR UPDATE/DELETE` requires `manage`. The agent connects as `agent`
@@ -278,6 +282,7 @@ boundary holds no matter what SQL the LLM generates — RLS is the backstop
 against prompt injection.
 
 ### 5. Scoped delegation — `keycloak/init.py` + `agent/{identity,db}.py`
+
 `keycloak-init` registers four optional client scopes: `finance:read` /
 `finance:write` (operation) and `svc:transactions` / `svc:payments` (service,
 each carrying an audience mapper). Each is assigned to exactly one per-service
@@ -299,16 +304,16 @@ directly on the write path).
 
 ## Ports
 
-| Service   | URL / port                              |
-|-----------|-----------------------------------------|
-| Postgres  | `localhost:5432` (`postgres`/`postgres`)|
-| Keycloak  | `http://localhost:8080` (`admin`/`admin`)|
-| SpiceDB   | `localhost:50051` (preshared key `supersecretkey`) |
+| Service  | URL / port                                         |
+| -------- | -------------------------------------------------- |
+| Postgres | `localhost:5432` (`postgres`/`postgres`)           |
+| Keycloak | `http://localhost:8080` (`admin`/`admin`)          |
+| SpiceDB  | `localhost:50051` (preshared key `supersecretkey`) |
 
 ## Troubleshooting
 
 - **Token exchange fails (400/`access_denied`/`invalid_request`).** This demo
-  targets Keycloak 26.2+, where *standard* token exchange is enabled per-client
+  targets Keycloak 26.2+, where _standard_ token exchange is enabled per-client
   via the `standard.token.exchange.enabled` attribute (set on both per-service
   agent clients in the realm export). Two details make it work and are baked in:
   (1) the `finance-portal` client has **audience mappers** adding each agent

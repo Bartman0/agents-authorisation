@@ -27,6 +27,7 @@ import sys
 
 import anthropic
 
+import authz
 import db
 import identity
 import spicedb
@@ -146,8 +147,16 @@ def _run_tool(session, tool_name, tool_input) -> str:
         else:  # make_payment
             acct = tool_input["account_id"]
             amount_eur = abs(float(tool_input["amount_eur"]))
-            # Live, context-aware authorization for a precise reason. RLS is still
-            # the hard backstop on the INSERT below.
+            # Per-SESSION ceiling (Keycloak policy): is this session allowed to pay
+            # at all? Denies a read-only session even though the payments client
+            # could mint a write token.
+            session_ok, session_reason = authz.session_may_pay(session.user_token)
+            print(f"  \033[2m[payments-service] per-session policy -> Keycloak: "
+                  f"{'authorized' if session_ok else 'DENIED'}\033[0m", flush=True)
+            if not session_ok:
+                print(f"  \033[31m[make_payment refused] {session_reason}\033[0m", flush=True)
+                return json.dumps({"error": f"payment refused: {session_reason}"})
+            # Context-aware authorization for a precise reason (amount/account).
             allowed, reason = spicedb.authorize_payment(token.sub, acct, amount_eur)
             print(f"  \033[2m[payments-service] pay {amount_eur} EUR from account {acct} -> "
                   f"SpiceDB: {'authorized' if allowed else 'refused'}\033[0m", flush=True)
@@ -200,13 +209,21 @@ def main() -> None:
         action="store_true",
         help="Expose the payments tool (which uses the payments-service client).",
     )
+    parser.add_argument(
+        "--session-purpose",
+        choices=["read", "readwrite"],
+        help="Override the session purpose claim. Default: readwrite with --allow-write, else read. "
+        "Use --allow-write --session-purpose read to show the per-session ceiling deny a payment.",
+    )
     parser.add_argument("--debug", action="store_true", help="Log the raw Keycloak tokens and their claims.")
     args = parser.parse_args()
 
-    session = identity.login(args.user, args.password, debug=args.debug)
+    purpose = args.session_purpose or ("readwrite" if args.allow_write else "read")
+    session = identity.login(args.user, args.password, purpose=purpose, debug=args.debug)
     services = "transactions + payments" if args.allow_write else "transactions only"
     print(
-        f"Authenticated {session.username} -> sub={session.user_id} | services available: {services}",
+        f"Authenticated {session.username} -> sub={session.user_id} | "
+        f"services available: {services} | session_purpose: {purpose}",
         flush=True,
     )
 

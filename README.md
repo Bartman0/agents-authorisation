@@ -281,6 +281,18 @@ exists for `current_setting('app.user_id')`: `FOR SELECT` requires `view`,
 boundary holds no matter what SQL the LLM generates — RLS is the backstop
 against prompt injection.
 
+### 5b. Per-session write ceiling — `keycloak/init.py` + `agent/authz.py`
+The per-client ceiling can't say "this session is read-only" (the payments client
+can always mint write). A **Keycloak Authorization-Services** policy adds a
+per-session ceiling: the user token carries a signed `session_purpose` claim (set
+at login via a `purpose:*` scope), and the payments client's `payment#execute`
+permission requires `session_purpose == readwrite`. Before a payment,
+`agent/authz.py` asks Keycloak to decide (UMA `response_mode=decision`); a
+read-only session is denied even on a write-capable client. See
+[`docs/per-session-authorization.md`](docs/per-session-authorization.md);
+`./demo-session-purpose.sh` proves it (no API key), and
+`--allow-write --session-purpose read` shows the live agent denied.
+
 ### 5. Scoped delegation — `keycloak/init.py` + `agent/{identity,db}.py`
 
 `keycloak-init` registers four optional client scopes: `finance:read` /
@@ -353,4 +365,5 @@ demo-permission-change.sh  live-demo a SpiceDB grant/revoke propagating to RLS
 demo-scoped-tokens.sh      prove the operation + service dimensions and per-service clients
 demo-caveat.sh             prove a SpiceDB caveat (pay-limit) enforced via RLS
 demo-transfers.sh          transfers + a live permission change, logging every token used
+demo-session-purpose.sh    per-session write ceiling via Keycloak Authorization Services
 ```

@@ -105,8 +105,17 @@ def _log_authorization_refused(client_id: str, requested: list[str]) -> None:
     print(f"   \033[31m   least privilege enforced at the IdP: the agent cannot obtain authority beyond this client's grant\033[0m", flush=True)
 
 
-def user_login(username: str, password: str) -> str:
-    """Return the user's access token via direct access grant."""
+def user_login(username: str, password: str, purpose: str | None = None) -> str:
+    """Return the user's access token via direct access grant.
+
+    `purpose` ('read' | 'readwrite') requests the matching `purpose:*` scope,
+    which stamps a signed `session_purpose` claim on the token. That claim is the
+    per-session write ceiling evaluated by Keycloak's payment policy — the agent
+    cannot alter it after login. See docs/per-session-authorization.md.
+    """
+    scope = "openid"
+    if purpose:
+        scope += f" purpose:{purpose}"
     resp = requests.post(
         TOKEN_URL,
         data={
@@ -114,7 +123,7 @@ def user_login(username: str, password: str) -> str:
             "client_id": PORTAL_CLIENT,
             "username": username,
             "password": password,
-            "scope": "openid",
+            "scope": scope,
         },
         timeout=15,
     )
@@ -221,5 +230,5 @@ class UserSession:
         return token
 
 
-def login(username: str, password: str, debug: bool = False) -> UserSession:
-    return UserSession(user_login(username, password), username, debug=debug)
+def login(username: str, password: str, purpose: str = "read", debug: bool = False) -> UserSession:
+    return UserSession(user_login(username, password, purpose), username, debug=debug)

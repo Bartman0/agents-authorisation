@@ -1,0 +1,55 @@
+// =============================================================================
+// SpiceDB schema  —  document sharing model
+// =============================================================================
+// Standalone model: documents shared by role. Kept separate from schema.zed
+// (the accounts/organizations demo). A SpiceDB instance holds ONE schema, so
+// only one of these files can be live at a time.
+//
+// Test fixtures for this model:
+//   document:readme#owner@user:alice
+//   document:readme#editor@user:bob
+//   document:readme#viewer@user:charlie
+// =============================================================================
+
+/**
+ * user represents a person who can be granted a role on a document.
+ */
+definition user {}
+
+/**
+ * document represents a shared document whose access is granted by role.
+ * Roles are hierarchical: owner ⊃ editor ⊃ viewer.
+ */
+definition document {
+    /**
+     * owner indicates that the user owns the document and controls its access.
+     */
+    relation owner: user
+
+    /**
+     * editor indicates that the user may modify the document's contents.
+     */
+    relation editor: user
+
+    /**
+     * viewer indicates that the user may read the document.
+     */
+    relation viewer: user
+
+    /**
+     * share indicates the user may change who has access to the document,
+     * which is reserved to owners.
+     */
+    permission share = owner
+
+    /**
+     * edit indicates the user may modify the document, granted to editors and,
+     * by virtue of ownership, to owners.
+     */
+    permission edit = owner + editor
+
+    /**
+     * view indicates the user may read the document, granted to any role.
+     */
+    permission view = viewer + edit
+}

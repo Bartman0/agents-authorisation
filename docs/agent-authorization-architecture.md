@@ -3,7 +3,8 @@
 **Type:** Architecture / pattern reference
 **Owner:** Richard Kooijman
 **Status:** Working reference implementation (demo)
-**Last updated:** 2026-07-30
+**Last updated:** 2026-08-03
+**Repo:** https://github.com/Bartman0/agents-authorisation
 **Canonical source:** `docs/agent-authorization-architecture.md` in the
 `agents-authorisation` repo. Any wiki copy is a mirror for discoverability —
 **edit the repo file, not the wiki page.**
@@ -24,7 +25,7 @@ can do — and often less**. This is a runnable pattern for exactly that:
 - A **Claude agent** answers questions and performs actions strictly inside that
   boundary.
 
-The agent's effective authority is the **intersection** of four independently
+The agent's effective authority is the **intersection** of five independently
 enforced dimensions:
 
 ```
@@ -32,6 +33,7 @@ effective access =  WHO         (SpiceDB relationships → materialized RLS on t
                  ∩  OPERATION   (read vs write — OAuth scope → DB role + READ ONLY tx)
                  ∩  SERVICE     (which backend — per-service client + token audience)
                  ∩  CONDITION   (e.g. "pay ≤ €X" — SpiceDB caveat → materialized limit + live check)
+                 ∩  SESSION     (this session's purpose — Keycloak Authorization-Services policy)
 ```
 
 The key property: **even a fully compromised or prompt-injected agent cannot read
@@ -149,7 +151,7 @@ what SQL the LLM generates — the backstop against prompt injection.
 
 ---
 
-## The four authorization dimensions
+## The five authorization dimensions
 
 | Dimension | Defined in | Carried by | Enforced by |
 |---|---|---|---|
@@ -157,8 +159,9 @@ what SQL the LLM generates — the backstop against prompt injection.
 | **Operation** (read/write) | tool → scope mapping | `finance:read` / `finance:write` | DB role (`agent` SELECT-only vs `agent_writer`) + `READ ONLY` tx + per-command RLS (`view` vs `manage`) |
 | **Service** (which backend) | per-service Keycloak client | `svc:transactions` / `svc:payments` scope → token `aud` | Keycloak (`invalid_scope`) + resource-server `aud` check |
 | **Condition** (e.g. pay ≤ €X) | SpiceDB caveat | relationship-bound caveat context | materialized `max_amount` in RLS `WITH CHECK` + live `CheckPermission` |
+| **Session** (this session's purpose) | Keycloak Authorization Services | `session_purpose` claim on the user token | UMA policy decision (`payment#execute` requires `session_purpose == readwrite`) |
 
-Each is enforced independently; the agent can do only what survives **all four**.
+Each is enforced independently; the agent can do only what survives **all five**.
 
 ### Who
 The SpiceDB schema:
@@ -193,7 +196,13 @@ scopes; the token's `aud` names exactly one service, and each service (resource
 server) checks its `aud`. A transactions token is refused by the payments service.
 
 ### Condition (caveats) — the hard part
-See below.
+See "Conditional access" below.
+
+### Session
+The per-client ceiling can't say "this session is read-only" — the payments
+client can always mint a write token. A Keycloak Authorization-Services policy
+adds a *per-session* ceiling keyed on a signed `session_purpose` claim. See
+"Per-session authorization ceiling" below.
 
 ---
 
@@ -235,6 +244,82 @@ dynamic (authoritative, explainable).*
 
 ---
 
+## Per-session authorization ceiling (Keycloak Authorization Services)
+
+The four dimensions above put the **operation ceiling on the client**:
+`finance-agent-transactions` is never assigned `finance:write`, so it can't mint a
+write token. Strong, but *per client* — it can't express "**this session** may only
+read, even though it runs on a write-capable client." The payments client can
+always mint write.
+
+The fifth dimension makes the write ceiling a **per-session decision, evaluated by
+Keycloak's policy engine** against an un-forgeable session claim.
+
+**1. A signed session-purpose claim.** At session start (the delegation boundary)
+the user token is minted carrying `session_purpose` = `read` | `readwrite`,
+stamped by Keycloak via a requested purpose scope (`purpose:read` /
+`purpose:readwrite`, each with a hardcoded-claim mapper). It is signed — the agent
+cannot alter it after login.
+
+**2. A Keycloak Authorization-Services policy on the payments client.** The
+payments client is a resource server with:
+
+```
+finance-agent-payments  (authorizationServicesEnabled = true)
+├─ resource:   payment
+├─ scope:      execute
+├─ policy:     session-is-readwrite     (Regex claim policy: session_purpose == "readwrite")
+└─ permission: payment#execute  requires  session-is-readwrite
+```
+
+**3. Evaluation at the action.** Before executing a payment, the payments service
+asks Keycloak to decide, presenting the **user token** (which carries
+`session_purpose` and already lists the payments client in its `aud`):
+
+```
+POST {token endpoint}
+  grant_type    = urn:ietf:params:oauth:grant-type:uma-ticket
+  audience      = finance-agent-payments
+  permission    = payment#execute
+  response_mode = decision
+  Authorization: Bearer {user token}
+→ 200 {"result": true}          ⇒ allow
+→ 403 {"error":"access_denied"} ⇒ deny (session is read-only)
+```
+
+Keycloak runs the policy against `session_purpose`. A read-only session is denied —
+centrally, dynamically, per session — **even on the write-capable payments client**.
+
+**Why the user token, not the delegated token.** Token exchange re-mints a fresh
+token for the target client, so a login claim isn't automatically present in the
+delegated token. The user (login) token reliably carries `session_purpose`, is held
+by the trusted orchestrator, and already has `finance-agent-payments` in its `aud`
+(portal audience mapper), so it's a valid requesting-party token. DB write authority
+still comes from the delegated token's `sub`; both share the same `sub`/`sid`.
+
+**How it layers (defense in depth).**
+
+```
+per-CLIENT scope allowance   (static floor)   — a read client cannot mint write at all
+per-SESSION UMA policy        (dynamic ceiling) — a read SESSION is denied write even on a write-capable client
+SpiceDB caveat (amount)       — pay ≤ limit
+RLS INSERT ... WITH CHECK     — unbypassable DB backstop
+```
+
+**Honest limitation (demo vs production).** *Who sets `session_purpose`,
+un-forgeably?* In production the user's delegation/consent step decides it and
+Keycloak stamps it; a stricter binding could use a **User Session Note** set by a
+custom authenticator SPI (survives token exchange because the `sid` is shared). In
+this single-process demo the orchestrator picks purpose at session-start login
+(tied to `--allow-write`) — the same trust boundary as `--allow-write`, but now the
+decision is a signed claim enforced by Keycloak's policy engine at action time, so
+it is central, auditable, dynamically changeable, and cannot be escalated later in
+the session without a fresh login. (Keycloak has no admin API to set a session note
+directly; the requested-scope claim is the no-SPI stand-in.) One extra Keycloak
+round-trip per payment; the read path is untouched.
+
+---
+
 ## Trade-offs & operational notes
 
 - **Eventual consistency.** Materialization means a brief lag between a change in
@@ -267,7 +352,8 @@ dynamic (authoritative, explainable).*
 - **Consistent identity.** One UUID across Keycloak, SpiceDB, and Postgres removes a
   common class of mapping bugs.
 - **Defense in depth.** Service access is enforced twice (Keycloak client cap +
-  resource-server `aud`); payment limits twice (materialized RLS + live check).
+  resource-server `aud`); payment limits twice (materialized RLS + live check); the
+  write ceiling twice (per-client scope floor + per-session Keycloak policy).
 
 ---
 
@@ -283,10 +369,15 @@ docker compose up -d --build
 ./demo-scoped-tokens.sh       # operation + service dimensions, per-service client isolation
 ./demo-caveat.sh              # caveat (pay-limit): SpiceDB verdict vs RLS outcome, side by side
 ./demo-transfers.sh           # transfers + a live permission change, logging every token used
+./demo-session-purpose.sh     # per-session write ceiling (Keycloak Authorization Services)
 
 # With a key — the live Claude agent:
 docker compose run --rm agent --user bob --password bob --allow-write \
   --ask "Show my balances, then pay 250 EUR from my business account to KPN for 'Internet'."
+
+# The per-session ceiling live: payments tool exposed, but a read-only session is denied.
+docker compose run --rm agent --user bob --password bob --allow-write --session-purpose read \
+  --ask "Pay 50 EUR from my business account to KPN."
 ```
 
 Demo users: `alice` (owns 1,2; delegate + ≤€500 payer on 3), `bob` (owns 3),
@@ -300,12 +391,13 @@ Demo users: `alice` (owns 1,2; delegate + ≤€500 payer on 3), `bob` (owns 3),
 docker-compose.yml         all services
 postgres/init/             schema, RLS policies (view / manage / pay), seed data
 keycloak/realm-export.json realm, clients, users (fixed UUIDs)
-keycloak/init.py           one-shot: register operation + service scopes per client
+keycloak/init.py           one-shot: register operation/service/purpose scopes; payments authz
 spicedb/schema.zed         authoritative model (relations, permissions, caveat)
 sync/                      bootstrap, Watch→Postgres worker, relctl, check
-agent/                     Claude agent: JIT scoped identity, DB access, live SpiceDB check, tools
+agent/                     Claude agent: JIT scoped identity, DB access, spicedb + authz checks, tools
 FIXTURES.md                identity mapping shared by all three systems
 demo-*.sh                  runnable proofs of each dimension
+docs/per-session-authorization.md   deeper design note for the session dimension
 ```
 
 ---

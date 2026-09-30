@@ -16,8 +16,16 @@
 # =============================================================================
 set -euo pipefail
 
-docker compose run --rm --no-deps -T --entrypoint python agent - <<'PY' 2>&1 | sed '/^ *Container /d'
-import identity, db
+# Payments now need the user's approval, recorded in payment_approvals before
+# the INSERT is allowed. Run a scripted stand-in for the user in the background
+# so this demo does not block; a real session uses `docker compose run approver`
+# in a second terminal and answers each prompt.
+approver_id=$(docker compose run -d --rm approver --auto)
+trap 'docker rm -f "$approver_id" >/dev/null 2>&1 || true' EXIT
+sleep 1
+
+docker compose run --rm --no-deps -T --entrypoint python broker - <<'PY' 2>&1 | sed '/^ *Container /d'
+import identity
 
 TX = (identity.TX_CLIENT, identity.TX_SECRET)     # transactions client
 PAY = (identity.PAY_CLIENT, identity.PAY_SECRET)  # payments client
@@ -50,12 +58,22 @@ tx = mint(bob, TX, ["finance:read", "svc:transactions"])
 print(f"  transactions token valid_for transactions-service: {tx.valid_for_service('transactions-service')}")
 print(f"  transactions token valid_for payments-service:     {tx.valid_for_service('payments-service')}")
 
+PY
+
+# Section 3 runs in the AGENT container: it is the side that touches Postgres,
+# and it reaches authority only through the broker.
+docker compose run --rm --no-deps -T --entrypoint python agent - <<'PY' 2>&1 | sed '/^ *Container /d'
+import identity, db
+identity.VERBOSE = False   # section 3 is about RLS, not the token banners
+
 print("\n=== 3) On top of all that, RLS still bounds the rows ===")
-pay = mint(bob, PAY, ["finance:write", "svc:payments"])
+bob = identity.login("bob", "bob", purpose="readwrite")
 INS = ("INSERT INTO transactions (account_id, booked_at, amount, currency, counterparty, description)"
        " VALUES (%s, now(), %s, 'EUR', %s, %s) RETURNING id")
 def pay_from(acct, note):
     try:
+        pay = bob.authorize_payment(account_id=acct, amount_eur=1.0,
+                                    counterparty="demo-cleanup", description="demo")
         r = db.run_sql(INS, pay.sub, may_write=pay.may_write, params=(acct, -1.0, "demo-cleanup", "demo"))
         print(f"  pay from account {acct} ({note}): {r['status']} ({r['rowcount']} row affected)")
     except Exception as e:

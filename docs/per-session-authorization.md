@@ -76,8 +76,9 @@ authority still comes from the delegated token's `sub`; both share the same
 ```
 per-CLIENT scope allowance   (static floor)  — a read client cannot mint write at all
 per-SESSION UMA policy        (dynamic ceiling) — a read SESSION is denied write even on a write-capable client   ← this note
+per-ACTION user approval      (intent)        — the user approved THIS payment, recorded in payment_approvals
 SpiceDB caveat (amount)       — pay ≤ limit
-RLS INSERT ... WITH CHECK     — unbypassable DB backstop
+RLS INSERT ... WITH CHECK     — unbypassable DB backstop, AND-ed with the approval match
 ```
 
 The per-session policy sits between the client floor and the DB backstop. It is
@@ -90,7 +91,7 @@ the piece that catches "the client *could* write, but this session must not."
 | purpose scopes + `session_purpose` mapper; payments authz (resource/scope/policy/permission) | `keycloak/init.py` |
 | login requests the purpose scope | `agent/identity.py` (`login(..., purpose=…)`) |
 | UMA decision request | `agent/authz.py` (`session_may_pay`) |
-| enforcement in the payment path | `agent/agent.py` (`make_payment`, next to the SpiceDB caveat check) |
+| enforcement in the payment path | `broker/broker.py` (`authorize_payment`), before any token is issued |
 | demonstration (no API key) | `demo-session-purpose.sh` |
 
 ## The honest limitation (demo vs production)
@@ -101,14 +102,19 @@ the piece that catches "the client *could* write, but this session must not."
   Keycloak stamps it; the agent never sees a choice. A stricter binding could use
   a **User Session Note** set by a custom authenticator SPI (survives token
   exchange because the `sid` is shared), removing reliance on a requested scope.
-- *This demo:* the orchestrator picks the purpose at session-start login (tied to
-  `--allow-write`) and requests the matching purpose scope. In a single-process
-  demo the session-starter and the agent are the same code, so this is the same
-  trust boundary as `--allow-write` — **but** the decision is now a signed claim
-  enforced by Keycloak's policy engine at action time, so it is central,
-  auditable, dynamically changeable, and cannot be escalated later within the
-  session without a fresh login. (Note: Keycloak has no admin API to set a user
-  *session note* directly; the requested-scope claim is the no-SPI stand-in.)
+- *This demo:* the **broker** performs the login and requests the matching
+  purpose scope; the agent is handed only a session handle. The session-starter
+  and the agent are no longer the same process, so this is no longer "the same
+  trust boundary as `--allow-write`": the agent has no password, cannot
+  re-authenticate, and therefore cannot escalate the purpose within or after the
+  session. The decision is a signed claim enforced by Keycloak's policy engine at
+  action time — central, auditable and dynamically changeable. (Note: Keycloak
+  has no admin API to set a user *session note* directly; the requested-scope
+  claim is the no-SPI stand-in.)
+
+  What remains is ordinary trust in the broker: it is the component that
+  authenticates the user, so it is the component that decides what their session
+  is for. See `broker/broker.py`.
 
 ## Trade-off
 

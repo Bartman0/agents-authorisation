@@ -12,11 +12,12 @@
 #   * the payments client still mints a finance:write token (per-client allows it)
 #   * Keycloak's per-session policy allows readwrite and DENIES read
 #
+# Runs inside the BROKER container: it is the only process holding a user token.
 # No Anthropic API key needed.  Usage:  ./demo-session-purpose.sh
 # =============================================================================
 set -euo pipefail
 
-docker compose run --rm --no-deps -T --entrypoint python agent - <<'PY' 2>&1 | sed '/^ *Container /d'
+docker compose run --rm --no-deps -T --entrypoint python broker - <<'PY' 2>&1 | sed '/^ *Container /d'
 import identity, authz
 
 def banner(m): print(f"\n\033[1;30;46m===== {m} {'='*max(3, 60-len(m))}\033[0m")

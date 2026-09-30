@@ -26,7 +26,7 @@ for user in alice bob carol dave; do
   echo "  $user  (sub=$sub)"
   echo "==================================================================="
   run <<SQL
-SELECT set_config('app.user_id', '$sub', false);
+SET app.user_id = '$sub';
 \echo 'Visible accounts:'
 SELECT id, name, iban FROM accounts ORDER BY id;
 \echo 'Transaction count per visible account:'

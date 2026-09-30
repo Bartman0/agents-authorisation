@@ -75,19 +75,23 @@ between the four users, and prints exactly what each can see. Expected:
 
 ```bash
 # Alice sees her own accounts + Bob's business account (she's a delegate):
-docker compose run --rm agent --user alice --password alice \
+HANDLE=$(docker compose run --rm -T login --user alice --password alice --purpose read)
+docker compose run --rm agent --session "$HANDLE" \
   --ask "List every account I can see and its balance."
 
 # Bob only sees his business account — he cannot see Alice's:
-docker compose run --rm agent --user bob --password bob \
+HANDLE=$(docker compose run --rm -T login --user bob --password bob --purpose read)
+docker compose run --rm agent --session "$HANDLE" \
   --ask "Show me all transactions over 1000 euros in June."
 
 # Dave is the org auditor — same agent, same code, but he sees everything:
-docker compose run --rm agent --user dave --password dave \
+HANDLE=$(docker compose run --rm -T login --user dave --password dave --purpose read)
+docker compose run --rm agent --session "$HANDLE" \
   --ask "What is the total balance across all accounts in the organization?"
 
 # Interactive session:
-docker compose run --rm agent --user alice --password alice
+HANDLE=$(docker compose run --rm -T login --user alice --password alice --purpose read)
+docker compose run --rm agent --session "$HANDLE"
 ```
 
 Add `--debug` to any invocation to log the raw Keycloak tokens and their decoded
@@ -96,7 +100,8 @@ claims — the user's login token, then each per-tool delegated token (e.g.
 This makes the on-behalf-of flow visible:
 
 ```bash
-docker compose run --rm agent --user alice --password alice --debug \
+HANDLE=$(docker compose run --rm -T login --user alice --password alice --purpose read)
+docker compose run --rm agent --session "$HANDLE" --debug \
   --ask "Which accounts can I see?"
 ```
 
@@ -176,11 +181,13 @@ per-service client for each tool call.
 
 ```bash
 # Read-only agent (default): only query_transactions is exposed (transactions client).
-docker compose run --rm agent --user bob --password bob \
+HANDLE=$(docker compose run --rm -T login --user bob --password bob --purpose read)
+docker compose run --rm agent --session "$HANDLE" \
   --ask "Pay 250 EUR to KPN from my business account."   # declines — no payment capability
 
 # Read+payments agent: adds make_payment (payments client); one client per tool.
-docker compose run --rm agent --user bob --password bob --allow-write \
+HANDLE=$(docker compose run --rm -T login --user bob --password bob --purpose readwrite)
+docker compose run --rm agent --session "$HANDLE" --allow-write \
   --ask "Show my balances, then pay 250 EUR from my business account to KPN for 'Internet'."
 
 # Prove per-service isolation + operation + RLS without an API key:
@@ -224,7 +231,8 @@ matches SpiceDB's authoritative caveat evaluation on every case.
 ```bash
 ./demo-caveat.sh          # SpiceDB verdict vs RLS outcome, side by side (no API key)
 
-docker compose run --rm agent --user alice --password alice --allow-write \
+HANDLE=$(docker compose run --rm -T login --user alice --password alice --purpose readwrite)
+docker compose run --rm agent --session "$HANDLE" --allow-write \
   --ask "Pay 900 EUR from account 3 to Supplier; if refused, pay 300 instead."
 # 900 is refused by RLS (over Alice's 500 limit); 300 succeeds.
 ```
@@ -246,7 +254,7 @@ fast read path.
 
 ## How the pieces fit
 
-### 1. Identity — `agent/identity.py`
+### 1. Identity — `broker/identity.py` (agent side: `agent/identity.py`)
 
 - The user logs in via Keycloak's direct-access grant on the public
   `finance-portal` client (stands in for a normal browser login).
@@ -281,19 +289,21 @@ exists for `current_setting('app.user_id')`: `FOR SELECT` requires `view`,
 boundary holds no matter what SQL the LLM generates — RLS is the backstop
 against prompt injection.
 
-### 5b. Per-session write ceiling — `keycloak/init.py` + `agent/authz.py`
+### 5b. Per-session write ceiling — `keycloak/init.py` + `broker/authz.py`
 The per-client ceiling can't say "this session is read-only" (the payments client
 can always mint write). A **Keycloak Authorization-Services** policy adds a
 per-session ceiling: the user token carries a signed `session_purpose` claim (set
 at login via a `purpose:*` scope), and the payments client's `payment#execute`
 permission requires `session_purpose == readwrite`. Before a payment,
-`agent/authz.py` asks Keycloak to decide (UMA `response_mode=decision`); a
-read-only session is denied even on a write-capable client. See
-[`docs/per-session-authorization.md`](docs/per-session-authorization.md);
-`./demo-session-purpose.sh` proves it (no API key), and
-`--allow-write --session-purpose read` shows the live agent denied.
+`broker/authz.py` asks Keycloak to decide (UMA `response_mode=decision`); a
+read-only session is denied even on a write-capable client, and because the
+broker checks before issuing a token, the agent has nothing to skip the check
+with. See [`docs/per-session-authorization.md`](docs/per-session-authorization.md);
+`./demo-session-purpose.sh` proves it (no API key), and opening the session with
+`login --purpose read` while running the agent with `--allow-write` shows the
+live agent denied.
 
-### 5. Scoped delegation — `keycloak/init.py` + `agent/{identity,db}.py`
+### 5. Scoped delegation — `keycloak/init.py` + `broker/identity.py` + `agent/db.py`
 
 `keycloak-init` registers four optional client scopes: `finance:read` /
 `finance:write` (operation) and `svc:transactions` / `svc:payments` (service,
@@ -304,6 +314,55 @@ the matching client per tool call, maps the granted `scope` to a DB role +
 transaction mode, and checks the `aud`. Because no client is allowed the other
 service's scopes, both service isolation and the read/write ceiling are enforced
 by Keycloak (`invalid_scope`), not merely by tool exposure.
+
+
+## The agent holds no user token, and no blanket write authority
+
+Two things the token alone cannot give you.
+
+**The user's token never enters the agent.** A separate broker authenticates the
+user and keeps the token; the agent is started with an opaque session handle.
+The handle is worthless against Keycloak, SpiceDB and Postgres — the broker is
+the only thing that accepts it — and the per-service client secrets and the
+tool → scope mapping live in the broker too. The agent names a *tool*; the
+broker decides what scopes that tool justifies. Because the agent has no
+password either, it cannot re-authenticate to widen its own session.
+
+```bash
+# The user opens the session. This is the only place a password is typed.
+HANDLE=$(docker compose run --rm -T login --user bob --password bob --purpose readwrite)
+
+# The agent gets the handle and nothing else.
+docker compose run --rm agent --session "$HANDLE" --allow-write
+```
+
+**A write token is not permission to write anything.** `finance:write` says the
+agent may write payments; it does not say *which* payment, so for its 120s life
+it would otherwise authorise any payment the user could have made. Before a
+payment can be written, the broker asks the user about the concrete action and
+records the approval in `payment_approvals`. A RESTRICTIVE policy on
+`transactions` (`postgres/init/04-approvals.sql`) then refuses any INSERT that
+does not match an unconsumed, unexpired row on all four fields.
+
+```bash
+# Approve or deny, in a second terminal. Deliberately not the agent's channel:
+# if the agent could approve, it would be approving its own requests.
+docker compose run --rm approver
+
+# Or watch the property directly, no API key needed:
+./demo-intent-binding.sh
+```
+
+The approval row *is* the enforced payload: the prompt is rendered from those
+four columns, so what the user reads is bit-for-bit what the database accepts,
+never a model-written summary of it. RFC 9396 `authorization_details` is the
+standard way to carry this inside the token, and Keycloak has no usable support
+for it; rather than invent a bespoke token and have the agent verify its own
+homework, the intent is enforced where the rest of the model is enforced.
+
+What this does not fix: the broker is now the single trusted component, and
+reads stay unbound — a `finance:read` token still covers everything the user may
+view, because there is no "the query I approved" to match against.
 
 ## Trade-off: eventual consistency
 
@@ -360,10 +419,13 @@ spicedb/schema.zed         the authoritative authz model (view + manage)
 sync/                      bootstrap, Watch->Postgres worker, relctl, check (caveat)
 agent/                     Claude agent: JIT scoped identity, DB access, live SpiceDB check, tools
 FIXTURES.md                the identity mapping all three systems share
+broker/                    session broker: holds the user token, decides scopes,
+                           collects payment approvals (login.py, approve.py)
 demo-rls.sh                prove the RLS boundary without Claude
 demo-permission-change.sh  live-demo a SpiceDB grant/revoke propagating to RLS
 demo-scoped-tokens.sh      prove the operation + service dimensions and per-service clients
 demo-caveat.sh             prove a SpiceDB caveat (pay-limit) enforced via RLS
 demo-transfers.sh          transfers + a live permission change, logging every token used
 demo-session-purpose.sh    per-session write ceiling via Keycloak Authorization Services
+demo-intent-binding.sh     a write token is not permission to write *anything*
 ```

@@ -293,17 +293,24 @@ centrally, dynamically, per session — **even on the write-capable payments cli
 **Why the user token, not the delegated token.** Token exchange re-mints a fresh
 token for the target client, so a login claim isn't automatically present in the
 delegated token. The user (login) token reliably carries `session_purpose`, is held
-by the trusted orchestrator, and already has `finance-agent-payments` in its `aud`
+by the broker, and already has `finance-agent-payments` in its `aud`
 (portal audience mapper), so it's a valid requesting-party token. DB write authority
 still comes from the delegated token's `sub`; both share the same `sub`/`sid`.
+
+The **per-action approval** row is what turns "may write payments" into "may write
+*this* payment". Without it the write token is a 120s blank cheque for anything the
+user could have paid; with it, an INSERT that does not match an unconsumed approval
+on account, amount, counterparty and description is refused by the database. See
+`postgres/init/04-approvals.sql` and `./demo-intent-binding.sh`.
 
 **How it layers (defense in depth).**
 
 ```
 per-CLIENT scope allowance   (static floor)   — a read client cannot mint write at all
 per-SESSION UMA policy        (dynamic ceiling) — a read SESSION is denied write even on a write-capable client
+per-ACTION user approval      (intent)        — the user approved THIS payment, recorded in payment_approvals
 SpiceDB caveat (amount)       — pay ≤ limit
-RLS INSERT ... WITH CHECK     — unbypassable DB backstop
+RLS INSERT ... WITH CHECK     — unbypassable DB backstop, AND-ed with the approval match
 ```
 
 **Honest limitation (demo vs production).** *Who sets `session_purpose`,
@@ -368,15 +375,18 @@ docker compose up -d --build
 ./demo-permission-change.sh   # a SpiceDB grant/revoke propagating to RLS (sub-second)
 ./demo-scoped-tokens.sh       # operation + service dimensions, per-service client isolation
 ./demo-caveat.sh              # caveat (pay-limit): SpiceDB verdict vs RLS outcome, side by side
+./demo-intent-binding.sh      # a valid write token cannot write an unapproved payment
 ./demo-transfers.sh           # transfers + a live permission change, logging every token used
 ./demo-session-purpose.sh     # per-session write ceiling (Keycloak Authorization Services)
 
 # With a key — the live Claude agent:
-docker compose run --rm agent --user bob --password bob --allow-write \
+HANDLE=$(docker compose run --rm -T login --user bob --password bob --purpose readwrite)
+docker compose run --rm agent --session "$HANDLE" --allow-write \
   --ask "Show my balances, then pay 250 EUR from my business account to KPN for 'Internet'."
 
 # The per-session ceiling live: payments tool exposed, but a read-only session is denied.
-docker compose run --rm agent --user bob --password bob --allow-write --session-purpose read \
+HANDLE=$(docker compose run --rm -T login --user bob --password bob --purpose read)
+docker compose run --rm agent --session "$HANDLE" --allow-write \
   --ask "Pay 50 EUR from my business account to KPN."
 ```
 
@@ -392,6 +402,8 @@ docker-compose.yml         all services
 postgres/init/             schema, RLS policies (view / manage / pay), seed data
 keycloak/realm-export.json realm, clients, users (fixed UUIDs)
 keycloak/init.py           one-shot: register operation/service/purpose scopes; payments authz
+broker/broker.py           session broker: holds the user token, decides scopes, takes approvals
+postgres/init/04-approvals.sql  intent binding: approved payments + RESTRICTIVE INSERT policy
 spicedb/schema.zed         authoritative model (relations, permissions, caveat)
 sync/                      bootstrap, Watch→Postgres worker, relctl, check
 agent/                     Claude agent: JIT scoped identity, DB access, spicedb + authz checks, tools

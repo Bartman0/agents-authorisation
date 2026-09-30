@@ -14,6 +14,14 @@
 # =============================================================================
 set -euo pipefail
 
+# Payments now need the user's approval, recorded in payment_approvals before
+# the INSERT is allowed. Run a scripted stand-in for the user in the background
+# so this demo does not block; a real session uses `docker compose run approver`
+# in a second terminal and answers each prompt.
+approver_id=$(docker compose run -d --rm approver --auto)
+trap 'docker rm -f "$approver_id" >/dev/null 2>&1 || true' EXIT
+sleep 1
+
 echo "=== Materialized pay grants (note max_amount) ==="
 docker compose exec -T -e PGPASSWORD=postgres postgres psql -U postgres -d finance -c \
   "SELECT subject_id, resource_id AS account, permission, max_amount
@@ -46,13 +54,14 @@ echo
 echo "=== DB/RLS outcome (materialized limit checked in the payment INSERT) ==="
 docker compose run --rm --no-deps -T --entrypoint python agent - <<'PY' 2>&1 | sed '/^ *Container /d'
 import identity, db
-PAY = (identity.PAY_CLIENT, identity.PAY_SECRET)
+identity.VERBOSE = False   # this demo is about the caveat, not the token banners
 INS = ("INSERT INTO transactions (account_id, booked_at, amount, currency, counterparty, description)"
        " VALUES (%s, now(), %s, 'EUR', %s, %s) RETURNING id")
 CASES = [("alice",3,300),("alice",3,900),("alice",1,5000),("bob",3,5000),("dave",3,100)]
 for user,acct,amt in CASES:
-    s = identity.login(user, user)
-    tok = s.mint(PAY[0], PAY[1], ["finance:write","svc:payments"])
+    s = identity.login(user, user, purpose="readwrite")
+    tok = s.authorize_payment(account_id=acct, amount_eur=amt,
+                              counterparty="caveat-demo", description="demo")
     try:
         r = db.run_sql(INS, tok.sub, may_write=tok.may_write, params=(acct, -float(amt), "caveat-demo", "demo"))
         print(f"  {user:5} pay {amt:>5} EUR from account {acct}: ALLOWED ({r['status']})")

@@ -98,12 +98,11 @@ services:
       spicedb-init:
         condition: service_completed_successfully
 
-  # Interactive; started on demand via `docker compose run`.
-  agent:
-    build: ./agent
+  # The only process that holds a user token. Owns the Keycloak client secrets,
+  # the tool -> scope mapping and the per-session policy check.
+  broker:
+    build: ./broker
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      AGENT_MODEL: ${AGENT_MODEL:-claude-sonnet-5}
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: finance-demo
       PORTAL_CLIENT_ID: finance-portal
@@ -111,6 +110,54 @@ services:
       AGENT_TX_CLIENT_SECRET: finance-agent-transactions-secret
       AGENT_PAY_CLIENT_ID: finance-agent-payments
       AGENT_PAY_CLIENT_SECRET: finance-agent-payments-secret
+      BROKER_PORT: "8000"
+      # Set to 1 for scripted demos, so they do not block waiting on a human.
+      BROKER_AUTO_APPROVE: ${BROKER_AUTO_APPROVE:-}
+      PGHOST: postgres
+      PGDATABASE: finance
+      BROKER_PGUSER: broker
+      BROKER_PGPASSWORD: brokerpw
+    # Deliberately NOT published to the host: the session API is reachable only
+    # from inside the compose network, by the agent, login and approver tools.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      keycloak-init:
+        condition: service_completed_successfully
+
+  # The user's own tool: authenticates to the broker and prints a session handle.
+  # Separate from the agent on purpose — this is where a password is typed.
+  login:
+    build: ./broker
+    entrypoint: ["python", "login.py"]
+    environment:
+      BROKER_URL: http://broker:8000
+    depends_on:
+      - broker
+    profiles: ["cli"]
+
+  # The approval channel. Deliberately a separate process from the agent: if the
+  # agent could approve, it would be approving its own requests.
+  approver:
+    build: ./broker
+    entrypoint: ["python", "approve.py"]
+    environment:
+      BROKER_URL: http://broker:8000
+    depends_on:
+      - broker
+    profiles: ["cli"]
+    stdin_open: true
+    tty: true
+
+  # Interactive; started on demand via `docker compose run`.
+  agent:
+    build: ./agent
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENT_MODEL: ${AGENT_MODEL:-claude-sonnet-5}
+      BROKER_URL: http://broker:8000
       SPICEDB_ENDPOINT: spicedb:50051
       SPICEDB_TOKEN: supersecretkey
       PGHOST: postgres
@@ -122,10 +169,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      keycloak:
-        condition: service_healthy
-      keycloak-init:
-        condition: service_completed_successfully
+      broker:
+        condition: service_started
       spicedb:
         condition: service_started
     profiles: ["cli"]

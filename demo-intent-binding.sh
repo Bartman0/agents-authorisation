@@ -29,7 +29,9 @@ purge_approvals
 # Scripted stand-in for the user approving at the broker. A real session runs
 # `docker compose run approver` in a second terminal and answers each prompt.
 approver_id=$(docker compose run -d --rm approver --auto)
-trap 'docker rm -f "$approver_id" >/dev/null 2>&1 || true' EXIT
+stop_approver() { docker rm -f "$approver_id" >/dev/null 2>&1 || true; }
+trap stop_approver EXIT
+trap 'stop_approver; exit 130' INT TERM
 sleep 1
 
 docker compose run --rm -T --entrypoint python agent - <<'ZZ' 2>&1 | sed '/^ *Container /d'

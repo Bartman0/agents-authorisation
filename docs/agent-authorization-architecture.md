@@ -20,12 +20,14 @@ can do — and often less**. This is a runnable pattern for exactly that:
 - A sync worker **materializes** SpiceDB's decisions into a Postgres table.
 - **Postgres Row Level Security (RLS)** enforces them on every query — one indexed
   lookup, no per-query call to SpiceDB, and impossible to bypass from the app.
-- **Keycloak** authenticates the user and, via **token exchange**, issues the agent
-  a *delegated, fit-for-purpose* token that acts on the user's behalf.
+- **Keycloak** authenticates the user and, via **token exchange**, issues a
+  *delegated, fit-for-purpose* token that acts on the user's behalf.
+- A **session broker** holds that user token and the client secrets. The agent
+  never sees either; it gets an opaque handle and asks per tool call.
 - A **Claude agent** answers questions and performs actions strictly inside that
   boundary.
 
-The agent's effective authority is the **intersection** of five independently
+The agent's effective authority is the **intersection** of six independently
 enforced dimensions:
 
 ```
@@ -34,6 +36,7 @@ effective access =  WHO         (SpiceDB relationships → materialized RLS on t
                  ∩  SERVICE     (which backend — per-service client + token audience)
                  ∩  CONDITION   (e.g. "pay ≤ €X" — SpiceDB caveat → materialized limit + live check)
                  ∩  SESSION     (this session's purpose — Keycloak Authorization-Services policy)
+                 ∩  INTENT      (the action the user approved — payment_approvals → RESTRICTIVE RLS)
 ```
 
 The key property: **even a fully compromised or prompt-injected agent cannot read
@@ -68,13 +71,16 @@ computed permissions into Postgres, where RLS enforces them.
 
 ```mermaid
 flowchart LR
-    user([User]) -->|login| KC[Keycloak]
-    agent[Claude agent] -->|token exchange<br/>on-behalf-of| KC
-    agent -->|run_sql / make_payment<br/>SET LOCAL app.user_id| PG[(PostgreSQL + RLS)]
+    user([User]) -->|login| BRK[Session broker]
+    BRK <-->|"login grant · token exchange<br/>per-session policy"| KC[Keycloak]
+    BRK -->|approved action| PG[(PostgreSQL + RLS)]
+    BRK -->|"session handle<br/>delegated token (120s)"| agent[Claude agent]
+    user <-->|"approve this payment?"| BRK
+    agent -->|run_sql / make_payment<br/>SET LOCAL app.user_id| PG
     agent -.->|live CheckPermission<br/>with context| SDB[SpiceDB]
     SDB -->|Watch API + LookupSubjects| SYNC[sync worker]
     SYNC -->|materialize| PG
-    PG -->|resource_access<br/>EXISTS lookup| PG
+    PG -->|"resource_access + payment_approvals<br/>EXISTS lookup"| PG
 ```
 
 **Components**
@@ -82,7 +88,8 @@ flowchart LR
 | Component | Role |
 |---|---|
 | PostgreSQL | Business data + RLS enforcement point |
-| Keycloak | Identity provider; user login + on-behalf-of token exchange |
+| Keycloak | Identity provider; user login + on-behalf-of token exchange + per-session policy |
+| Session broker | Holds the user token and the client secrets; maps a tool to scopes; collects payment approvals |
 | SpiceDB | Authoritative authorization model (relationships, permissions, caveats) |
 | sync worker | Tails SpiceDB's Watch API, materializes permissions into Postgres |
 | Claude agent | Tool-calling agent; each tool is a "backend service" behind the boundary |
@@ -94,20 +101,24 @@ transactions; users are owners, delegates, or org auditors.
 
 ## Identity: acting on behalf of the user
 
-1. **User login.** The user authenticates to Keycloak (demo uses a direct-access
-   grant; in production this is a normal browser login). Their `sub` (a stable
+1. **User login.** The user authenticates to the **broker**, which performs the
+   Keycloak login (demo uses a direct-access grant; in production this is a normal
+   browser login) and keeps the resulting token. Their `sub` (a stable
    UUID) is the identity everything keys on — the *same* UUID is used as the
    SpiceDB `user` object id and the Postgres `app.user_id`, so identity is
    consistent across all three systems.
 
-2. **Token exchange (RFC 8693).** Per task, the agent performs a token exchange,
-   presenting the user's token as the `subject_token`, and receives a **delegated**
-   token whose `sub` is still the user and whose `azp` is the acting agent client.
-   The agent cannot escalate to its own identity to widen access.
+2. **Token exchange (RFC 8693).** Per task, the **broker** performs a token
+   exchange, presenting the user's token as the `subject_token`, and receives a
+   **delegated** token whose `sub` is still the user and whose `azp` is the acting
+   agent client. That delegated token is what reaches the agent. The agent cannot
+   escalate to its own identity to widen access, and holding no password, it
+   cannot re-authenticate to widen the session.
 
-3. **Just-in-time (JIT) minting.** The user token is obtained once per session;
-   then *every tool call* mints a fresh, short-TTL (120s) token scoped to just that
-   call. This shrinks the blast radius if a token leaks mid-session.
+3. **Just-in-time (JIT) minting.** The broker obtains the user token once per
+   session and keeps it; then *every tool call* mints a fresh, short-TTL (120s)
+   token scoped to just that call. This shrinks the blast radius if a token leaks
+   mid-session, and the only token that can leak from the agent is one of those.
 
 4. **Per-service clients.** Each backend service trusts its own Keycloak client
    (`finance-agent-transactions`, `finance-agent-payments`). Keycloak caps what each
@@ -317,11 +328,12 @@ RLS INSERT ... WITH CHECK     — unbypassable DB backstop, AND-ed with the appr
 un-forgeably?* In production the user's delegation/consent step decides it and
 Keycloak stamps it; a stricter binding could use a **User Session Note** set by a
 custom authenticator SPI (survives token exchange because the `sid` is shared). In
-this single-process demo the orchestrator picks purpose at session-start login
-(tied to `--allow-write`) — the same trust boundary as `--allow-write`, but now the
-decision is a signed claim enforced by Keycloak's policy engine at action time, so
-it is central, auditable, dynamically changeable, and cannot be escalated later in
-the session without a fresh login. (Keycloak has no admin API to set a session note
+this demo the **broker** picks the purpose at session-start login and the agent is
+handed only a handle, so the session-starter and the agent are no longer the same
+process: the agent has no password, cannot re-authenticate, and therefore cannot
+escalate the purpose at all. The decision is a signed claim enforced by Keycloak's
+policy engine at action time, so it is central, auditable and dynamically
+changeable. What remains is ordinary trust in the broker. (Keycloak has no admin API to set a session note
 directly; the requested-scope claim is the no-SPI stand-in.) One extra Keycloak
 round-trip per payment; the read path is untouched.
 

@@ -1,6 +1,11 @@
 """A Claude-powered financial assistant that acts on behalf of a logged-in user
 with fit-for-purpose, just-in-time delegated tokens.
 
+The agent never holds the user's token or password. A separate broker owns the
+session; the agent is started with an opaque handle and asks the broker, per
+tool call, for the narrowest authority that tool needs. It names a TOOL; the
+broker decides the scopes.
+
 Two restriction dimensions, both carried by the token and enforced downstream:
   * OPERATION (read vs write) — the token's finance:read/finance:write scope
     selects a SELECT-only vs read/write DB role + a READ ONLY transaction;
@@ -12,13 +17,12 @@ Two restriction dimensions, both carried by the token and enforced downstream:
 Each backend service has its own Keycloak client: `finance-agent-transactions`
 (read-only) and `finance-agent-payments` (write). Neither can mint the other
 service's scopes, so isolation is Keycloak-enforced. For every tool call the
-orchestrator mints a fresh, short-TTL token via that tool's per-service client —
-the LLM only picks which tool to run.
+broker mints a fresh, short-TTL token via that tool's per-service client — the
+LLM only picks which tool to run.
 
-Run:
-    python agent.py --user alice --password alice
-    python agent.py --user bob   --password bob --allow-write \\
-        --ask "Pay 250 EUR from my business account to KPN for 'Internet'."
+Run (the handle comes from the broker's own login tool, not from here):
+    HANDLE=$(docker compose run --rm -T login --user alice --password alice)
+    python agent.py --session "$HANDLE"
 """
 import argparse
 import json
@@ -27,7 +31,6 @@ import sys
 
 import anthropic
 
-import authz
 import db
 import identity
 import spicedb
@@ -89,27 +92,6 @@ PAYMENT_TOOL = {
     },
 }
 
-# Each service has its own Keycloak client identity (client_id, secret).
-SERVICE_CLIENTS = {
-    TRANSACTIONS_SERVICE: (identity.TX_CLIENT, identity.TX_SECRET),
-    PAYMENTS_SERVICE: (identity.PAY_CLIENT, identity.PAY_SECRET),
-}
-
-# tool -> (scopes to request, service audience, why these scopes / least-privilege rationale).
-TOOL_SPEC = {
-    "query_transactions": (
-        ["finance:read", "svc:transactions"],
-        TRANSACTIONS_SERVICE,
-        "read-only access to the transactions service — no write, no payments scope requested",
-    ),
-    "make_payment": (
-        ["finance:write", "svc:payments"],
-        PAYMENTS_SERVICE,
-        "write access to the payments service only — no read/transactions scope requested",
-    ),
-}
-
-
 def _json_safe(v):
     from datetime import date, datetime
     from decimal import Decimal
@@ -121,41 +103,55 @@ def _json_safe(v):
     return v
 
 
-def _mint_for(session, tool_name):
-    """JIT: mint a fresh token via this tool's per-service client, then check aud."""
-    scopes, service, rationale = TOOL_SPEC[tool_name]
-    client_id, client_secret = SERVICE_CLIENTS[service]
-    # The task string records the CONDITION under which the agent requests this
-    # token — least privilege for exactly this tool. identity.mint logs it.
-    token = session.mint(client_id, client_secret, scopes, task=f"{tool_name} — {rationale}")
-    # Resource-server audience check: this service only accepts tokens for it.
+TOOL_SERVICE = {
+    "query_transactions": TRANSACTIONS_SERVICE,
+    "make_payment": PAYMENTS_SERVICE,
+}
+
+
+def _check_audience(token, service):
+    """Resource-server audience check: this service only accepts tokens for it.
+
+    Defence in depth. The broker already asked for exactly one service audience;
+    this catches the case where it got something else.
+    """
     if not token.valid_for_service(service):
         raise PermissionError(
             f"token not valid for {service} (aud={sorted(token.audiences)}) — "
-            f"this agent client may not be permitted that service"
+            f"the broker did not obtain authority for that service"
         )
     return token
 
 
 def _run_tool(session, tool_name, tool_input) -> str:
     try:
-        token = _mint_for(session, tool_name)
         if tool_name == "query_transactions":
             sql = tool_input["sql"]
+            token = _check_audience(
+                session.token_for(tool_name), TOOL_SERVICE[tool_name]
+            )
             print(f"  \033[2m[transactions-service] {sql}\033[0m", flush=True)
             result = db.run_sql(sql, token.sub, may_write=False)
         else:  # make_payment
             acct = tool_input["account_id"]
             amount_eur = abs(float(tool_input["amount_eur"]))
-            # Per-SESSION ceiling (Keycloak policy): is this session allowed to pay
-            # at all? Denies a read-only session even though the payments client
-            # could mint a write token.
-            session_ok, session_reason = authz.session_may_pay(session.user_token)
-            print(f"  \033[2m[payments-service] per-session policy -> Keycloak: "
-                  f"{'authorized' if session_ok else 'DENIED'}\033[0m", flush=True)
-            if not session_ok:
-                print(f"  \033[31m[make_payment refused] {session_reason}\033[0m", flush=True)
-                return json.dumps({"error": f"payment refused: {session_reason}"})
+            # The per-SESSION ceiling (Keycloak policy) is decided by the broker,
+            # which holds the user token the decision needs. The agent cannot skip
+            # it: a refusal means no write token exists to skip it with.
+            try:
+                token = _check_audience(
+                    session.authorize_payment(
+                        account_id=acct,
+                        amount_eur=amount_eur,
+                        counterparty=tool_input["counterparty"],
+                        description=tool_input["description"],
+                        task=f"pay EUR {amount_eur} from account {acct}",
+                    ),
+                    TOOL_SERVICE[tool_name],
+                )
+            except identity.BrokerError as exc:
+                print(f"  \033[31m[make_payment refused] {exc}\033[0m", flush=True)
+                return json.dumps({"error": f"payment refused: {exc}"})
             # Context-aware authorization for a precise reason (amount/account).
             allowed, reason = spicedb.authorize_payment(token.sub, acct, amount_eur)
             print(f"  \033[2m[payments-service] pay {amount_eur} EUR from account {acct} -> "
@@ -201,29 +197,29 @@ def ask(client, session, tools, messages) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Claude finance agent (fit-for-purpose delegated tokens).")
-    parser.add_argument("--user", required=True)
-    parser.add_argument("--password", required=True)
+    parser.add_argument(
+        "--session",
+        required=True,
+        help="Broker session handle, from the broker's login tool. The agent takes no credentials: "
+        "it never sees the user's password or token.",
+    )
     parser.add_argument("--ask", help="Single question, then exit. Omit for an interactive session.")
     parser.add_argument(
         "--allow-write",
         action="store_true",
-        help="Expose the payments tool (which uses the payments-service client).",
+        help="Expose the payments tool. Whether a payment is actually permitted is the broker's "
+        "decision, from the session_purpose fixed at login — use --allow-write on a read session "
+        "to watch the per-session ceiling refuse one.",
     )
-    parser.add_argument(
-        "--session-purpose",
-        choices=["read", "readwrite"],
-        help="Override the session purpose claim. Default: readwrite with --allow-write, else read. "
-        "Use --allow-write --session-purpose read to show the per-session ceiling deny a payment.",
-    )
-    parser.add_argument("--debug", action="store_true", help="Log the raw Keycloak tokens and their claims.")
+    parser.add_argument("--debug", action="store_true", help="Log the raw delegated tokens and their claims.")
     args = parser.parse_args()
 
-    purpose = args.session_purpose or ("readwrite" if args.allow_write else "read")
-    session = identity.login(args.user, args.password, purpose=purpose, debug=args.debug)
+    session = identity.attach(args.session, debug=args.debug)
     services = "transactions + payments" if args.allow_write else "transactions only"
     print(
-        f"Authenticated {session.username} -> sub={session.user_id} | "
-        f"services available: {services} | session_purpose: {purpose}",
+        f"Attached to broker session for {session.username} -> sub={session.user_id} | "
+        f"tools exposed: {services} | session_purpose: {session.purpose} | "
+        f"user token held by agent: none",
         flush=True,
     )
 

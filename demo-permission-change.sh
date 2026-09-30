@@ -60,7 +60,11 @@ relctl() { docker compose run --rm --no-deps --entrypoint python sync relctl.py 
 ask_agent() {  # $1 = username
   [ "$USE_AGENT" = "--agent" ] || return 0
   echo; bold "Claude agent, acting as $1:"
-  docker compose run --rm agent --user "$1" --password "$1" \
+  # The user opens the session; the agent is handed a handle, never a password.
+  local handle
+  handle=$(docker compose run --rm --no-deps -T login --user "$1" --password "$1" --purpose read \
+    2>/dev/null | tr -d '\r' | tail -n 1)
+  docker compose run --rm agent --session "$handle" \
     --ask "Which accounts can I see? List their names only." 2>&1 | sed '/^ *Container /d'
 }
 

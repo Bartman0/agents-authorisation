@@ -5,7 +5,7 @@
 #
 # Storyline (all on Bob's account 3, where Alice is a limited_payer ≤ EUR 500):
 #   0. Ensure the baseline limit is EUR 500.
-#   1. Log each user's login token.
+#   1. Show what the agent actually holds (a handle, not a token).
 #   2. Transfers under the EUR 500 limit: successes and a caveat refusal.
 #   3. PERMISSION CHANGE — raise Alice's limit to EUR 1000 in SpiceDB, wait for
 #      the sync worker to materialize it, then retry the transfer that failed.
@@ -35,7 +35,6 @@ from google.protobuf.struct_pb2 import Struct
 ALICE = "11111111-1111-1111-1111-111111111111"
 BOB   = "22222222-2222-2222-2222-222222222222"
 DAVE  = "44444444-4444-4444-4444-444444444444"
-PAY   = (identity.PAY_CLIENT, identity.PAY_SECRET)
 INS   = ("INSERT INTO transactions (account_id, booked_at, amount, currency, counterparty, description)"
          " VALUES (%s, now(), %s, 'EUR', %s, %s) RETURNING id")
 
@@ -80,13 +79,15 @@ def set_alice_limit(new_limit):
         time.sleep(0.25)
     narr(f"WARNING: limit did not materialize to {new_limit} in time")
 
-# reuse one session per user (one login each)
-sessions = {u: identity.login(u, u) for u in ("alice", "bob", "dave")}
+# reuse one broker session per user (one login each). The session objects
+# below hold a handle and nothing else: no password, no user token.
+sessions = {u: identity.login(u, u, purpose="readwrite") for u in ("alice", "bob", "dave")}
 
 def transfer(user, sub_id, acct, amount):
     # task string = the condition under which this token is requested (least privilege).
     task = f"pay EUR {amount} from account {acct} — payments service only, no read scope"
-    tok = sessions[user].mint(PAY[0], PAY[1], ["finance:write", "svc:payments"], task=task)
+    tok = sessions[user].authorize_payment(account_id=acct, amount_eur=amount,
+                                           counterparty="transfer-demo", description="demo", task=task)
     token_log(f"delegated token — {user} paying EUR {amount} from account {acct}", tok.raw)
     allowed, reason = spicedb.authorize_payment(tok.sub, acct, amount)   # authoritative, precise reason
     if not allowed:
@@ -103,19 +104,22 @@ banner("STEP 0 — baseline: ensure Alice's payment limit on account 3 is EUR 50
 set_alice_limit(500)
 narr(f"materialized max_amount for (alice, account 3, pay) = {materialized_limit()}")
 
-banner("STEP 1 — user login tokens (on-behalf-of starts here)")
+banner("STEP 1 — what the agent actually holds for each user")
+narr("The user token lives in the broker. All the agent gets is an opaque handle:")
 for u in ("alice", "bob", "dave"):
-    token_log(f"user login token — {u}", sessions[u].user_token)
+    s_ = sessions[u]
+    narr(f"  {u:5} handle={s_.handle[:12]}...  sub={s_.user_id}  purpose={s_.purpose}")
+narr("A handle is not a credential for Keycloak, SpiceDB or Postgres — only the broker takes it.")
 
 banner("STEP 2 — least-privilege ceiling: the agent cannot over-request")
-narr("The payments client asks for read/transactions authority too (more than it needs):")
+narr("The agent cannot name a scope at all; it can only name a tool. Asking for one")
+narr("the broker does not publish is as far as over-requesting goes:")
 try:
-    sessions["alice"].mint(PAY[0], PAY[1],
-                           ["finance:write", "svc:payments", "finance:read", "svc:transactions"],
-                           task="over-broad: pay AND read transactions in one token")
+    sessions["alice"].token_for("read_and_pay_everything",
+                                task="over-broad: pay AND read transactions in one token")
     narr("unexpectedly granted (should not happen)")
-except Exception:
-    narr("Keycloak refused it (see RESTRICTED above). The agent only ever gets the payments authority it needs.")
+except identity.BrokerError as exc:
+    narr(f"broker refused it: {exc}. The scope decision is not in the agent process to abuse.")
 
 banner("STEP 3 — transfers under the EUR 500 limit")
 narr("Alice is limited_payer ≤500 on account 3; Bob owns 3 (unlimited); Dave is auditor (no pay).")

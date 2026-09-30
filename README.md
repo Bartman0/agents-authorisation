@@ -401,6 +401,11 @@ does not match an unconsumed, unexpired row on all four fields.
 # if the agent could approve, it would be approving its own requests.
 docker compose run --rm approver
 
+# The scripted demos start `approver --auto` in the background instead. It stops
+# itself after 10 minutes (--max-age, or APPROVER_MAX_AGE), because a trap cannot
+# run if the script is SIGKILLed and an auto-approver that outlives its demo would
+# sit there approving whatever the next agent proposes.
+
 # Or watch the property directly, no API key needed:
 ./demo-intent-binding.sh
 ```

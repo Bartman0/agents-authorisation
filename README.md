@@ -9,8 +9,12 @@ agent's good behavior.
 - A **sync worker** materializes SpiceDB's decisions into a Postgres table.
 - **Postgres Row Level Security** enforces those decisions on every query — a
   single indexed lookup, no per-query call to SpiceDB.
-- **Keycloak** authenticates the user and, via **token exchange**, issues the
-  agent a delegated token so it acts _on behalf of_ the user.
+- **Keycloak** authenticates the user and, via **token exchange**, issues a
+  delegated token so the agent acts _on behalf of_ the user.
+- A **session broker** is the only process that holds that user token. The agent
+  gets an opaque handle, and asks the broker for authority one tool call at a time.
+- Payments additionally need the user's **approval of that exact action**, recorded
+  in the database and enforced there.
 - A **Claude agent** answers finance questions by querying Postgres behind that
   boundary.
 
@@ -25,24 +29,36 @@ agent's good behavior.
 ## Architecture
 
 ```drawing
-                 ┌──────────────┐   token exchange (on-behalf-of)
-   user login    │   Keycloak   │◄────────────────────────────────┐
- ─────────────►  │  (OIDC/IdP)  │                                 │
-                 └──────────────┘                                 │
-                        │ delegated token (sub = user, act = agent)
-                        ▼                                         │
-                 ┌──────────────┐   run_sql (SELECT-only)   ┌───────────┐
-   question ───► │ Claude agent │──────────────────────────►│ PostgreSQL│
-   answer   ◄─── │ (agent role) │   SET LOCAL app.user_id   │  + RLS    │
-                 └──────────────┘                           └───────────┘
-                                                                  ▲
-                                              resource_access     │ EXISTS lookup
-                                             (materialized)  ─────┘
-                                                                  ▲
-                 ┌──────────────┐   Watch API + LookupSubjects    │
-                 │   SpiceDB    │◄────────  sync worker  ─────────┘
-                 │ (authz model)│    (SpiceDB → Postgres projection)
-                 └──────────────┘
+   ┌──────────────┐
+   │     user     │  logs in once; approves each payment on a channel of their own
+   └──────────────┘
+      │        ▲
+      │ login  │ "pay 250.00 EUR to KPN for Internet?"
+      ▼        │
+   ┌───────────────────┐   login grant + purpose    ┌───────────────────┐
+   │  Session broker   │ ─────────────────────────► │     Keycloak      │
+   │                   │   user token STOPS here    │     (OIDC/IdP)    │
+   │ holds the user    │ ◄───────────────────────── │                   │
+   │ token; maps a     │   token exchange per tool  │  per-session      │
+   │ tool to scopes    │ ◄────────────────────────► │  policy decision  │
+   └───────────────────┘                            └───────────────────┘
+      │           │
+      │ session   │ the approved action
+      │ handle +  └──────────────────────────────┐
+      │ delegated token (120s, one aud)          │
+      ▼                                          ▼
+   ┌───────────────────┐              ┌──────────────────────────┐
+   │   Claude agent    │   run_sql    │       PostgreSQL         │
+   │   (agent role)    │ ───────────► │   + Row Level Security   │
+   └───────────────────┘  SET LOCAL   │                          │
+      │                   app.user_id │   resource_access        │
+      │ CheckPermission               │   payment_approvals      │
+      │ (amount in context)           └──────────────────────────┘
+      ▼                                          ▲
+   ┌───────────────────┐   Watch API +           │
+   │      SpiceDB      │ ──── sync worker ───────┘
+   │   (authz model)   │    (SpiceDB → Postgres projection)
+   └───────────────────┘
 ```
 
 ## Quick start
@@ -51,9 +67,13 @@ agent's good behavior.
 cp .env.example .env
 # put your ANTHROPIC_API_KEY in .env
 
-docker compose up -d --build      # postgres, keycloak, keycloak-init, spicedb, spicedb-init, sync
+docker compose up -d --build      # postgres, keycloak, keycloak-init, broker, spicedb, spicedb-init, sync
 docker compose logs -f sync       # wait for "initial reconciliation complete"
 ```
+
+> Upgrading an existing checkout? Postgres init scripts only run on an empty data
+> directory, so run `docker compose down` first or `payment_approvals` will not be
+> created.
 
 ### See the RLS boundary directly (no API key needed)
 
@@ -127,31 +147,37 @@ nothing, because RLS filtered the rows out before the agent ever saw them.
 
 ## Fit-for-purpose tokens
 
-The agent doesn't just prove _who_ it acts for — it holds a token restricted to
-_what it may do_, along two independent dimensions:
+The agent doesn't just prove _who_ it acts for — its authority is the
+intersection of several independently enforced dimensions:
 
 ```
-effective access  =  what the USER may do     (SpiceDB view/manage → RLS)
-                   ∩  the OPERATION permitted  (finance:read / finance:write)
-                   ∩  the SERVICE permitted    (aud: transactions / payments)
+effective access  =  what the USER may do        (SpiceDB view/manage/pay → RLS)
+                   ∩  the OPERATION permitted     (finance:read / finance:write)
+                   ∩  the SERVICE permitted       (aud: transactions / payments)
+                   ∩  this SESSION's purpose      (Keycloak policy on session_purpose)
+                   ∩  the ACTION the user approved (payment_approvals → RLS)
 ```
 
 A token can only ever narrow the user's authority (attenuation), never widen it,
-and the **LLM never chooses its own scope** — trusted orchestrator code maps each
-tool to the scopes it needs, Keycloak mints the token, and the resource servers + Postgres enforce it.
+and the **agent never names a scope at all** — it names a tool, and the broker maps
+that tool to the scopes it justifies. Keycloak mints the token; the resource
+servers and Postgres enforce it.
 
-**Just-in-time (JIT):** the user token is obtained once per session; then _every
-tool call_ mints a fresh, short-TTL (120s) token scoped to just that call. This
-shrinks the blast radius if a token leaks mid-session.
+**Just-in-time (JIT):** the broker obtains the user token once per session and
+keeps it; then _every tool call_ mints a fresh, short-TTL (120s) token scoped to
+just that call. This shrinks the blast radius if a token leaks mid-session — and
+the token that could leak from the agent is only ever one of those, never the
+user's own.
 
-Each mint logs the **request** — the task, the client, and the exact scopes asked
-for (`[token-request] … requesting ONLY: finance:read, svc:transactions`) — and
-then an **`ENFORCEMENT POINT`** block contrasting _requested_ vs _actually
-granted_, so the point where Keycloak caps the agent to the client's allowed
-scopes is explicit. An over-broad request (e.g. the payments client also asking
-for read scopes) is refused with a highlighted **`RESTRICTED`** block
-(`invalid_scope`, nothing granted). (`--debug` additionally prints the granted
-token's raw JWT and claims.)
+Each call logs the **request** — the task and the tool, which is the whole of what
+the agent is able to ask for (`[token-request] … the agent names a TOOL, never a
+scope -> tool=make_payment`) — and then an **`ENFORCEMENT POINT`** block
+contrasting what the broker _requested_ vs what Keycloak _actually granted_, so
+the point where Keycloak caps the client to its allowed scopes is explicit. A
+refusal, whether from the broker (unknown tool, read-only session, denied
+payment) or from Keycloak (`invalid_scope`), prints a highlighted
+**`RESTRICTED`** block with nothing granted. (`--debug` additionally prints the
+granted token's raw JWT and claims.)
 
 **Per-service clients — each backend service trusts its own Keycloak client:**
 
@@ -164,8 +190,8 @@ Each client is capped by Keycloak to exactly its service's scopes. There is **no
 client that can reach both services** — the transactions client asking for
 `svc:payments` (or `finance:write`) fails with `invalid_scope`, and vice versa.
 So service isolation _and_ the read/write ceiling are **enforced by Keycloak**,
-not merely by which tools the orchestrator exposes. The agent uses the matching
-per-service client for each tool call.
+not merely by which tools are exposed. The broker uses the matching per-service
+client for each tool call; the agent holds neither client's secret.
 
 **Enforcement points, all driven by the token:**
 
@@ -176,8 +202,13 @@ per-service client for each tool call.
   tokens as `agent_writer` (SELECT + DML); neither has `BYPASSRLS`.
 - **Operation (tx mode)** — read tokens run in a `READ ONLY` transaction.
 - **Rows (RLS)** — reads see rows the user may `view`; payments touch only rows
-  the user may `manage` (owns). So an **auditor with a write token changes
-  nothing**, and a **delegate can read an account but not pay from it**.
+  the user may `pay` from, within their caveated limit. So an **auditor with a
+  write token changes nothing**, and a **delegate can read an account but not pay
+  from it**.
+- **Session (Keycloak policy)** — a read-only session is refused a payment even
+  though the payments client could mint a write token.
+- **Action (approval row)** — a write token authorises the one payment the user
+  approved, once. Anything else is refused by the database, whatever the token says.
 
 ```bash
 # Read-only agent (default): only query_transactions is exposed (transactions client).
@@ -256,15 +287,21 @@ fast read path.
 
 ### 1. Identity — `broker/identity.py` (agent side: `agent/identity.py`)
 
-- The user logs in via Keycloak's direct-access grant on the public
-  `finance-portal` client (stands in for a normal browser login).
-- Per tool call the agent — using the confidential per-service client for that
-  tool (`finance-agent-transactions` or `finance-agent-payments`) — performs an
-  **RFC 8693 token exchange**, presenting the user's token as `subject_token`,
+- The user logs in **to the broker**, which authenticates them against Keycloak's
+  direct-access grant on the public `finance-portal` client (stands in for a
+  normal browser login). The broker keeps the resulting token; the user gets back
+  an opaque session handle and hands that to the agent.
+- Per tool call the **broker** — using the confidential per-service client for
+  that tool (`finance-agent-transactions` or `finance-agent-payments`) — performs
+  an **RFC 8693 token exchange**, presenting the user's token as `subject_token`,
   and receives a delegated token whose `sub` is still the user and whose `azp`
-  identifies the acting client.
+  identifies the acting client. That token, and only that token, goes to the agent.
 - The agent uses that `sub` as the database identity. It cannot escalate to its
-  own identity to widen access.
+  own identity to widen access, and because it holds no password it cannot
+  re-authenticate to widen the session either.
+- `agent/identity.py` is the agent's entire credential surface: a handle, a
+  broker URL, and whatever token comes back. See
+  [`broker/broker.py`](broker/broker.py) for what stays behind.
 
 ### 2. Authorization model — `spicedb/schema.zed` + `sync/fixtures.py`
 
@@ -284,12 +321,30 @@ caveat's bound limit (read via `ReadRelationships`) for conditional ones.
 
 Per-command RLS policies allow a row only if a matching `resource_access` row
 exists for `current_setting('app.user_id')`: `FOR SELECT` requires `view`,
-`FOR UPDATE/DELETE` requires `manage`. The agent connects as `agent`
-(SELECT-only) or `agent_writer` (SELECT + DML), never with `BYPASSRLS`, so the
-boundary holds no matter what SQL the LLM generates — RLS is the backstop
-against prompt injection.
+`FOR UPDATE/DELETE` requires `manage`, `FOR INSERT` requires `pay` within the
+materialized caveat limit. The agent connects as `agent` (SELECT-only) or
+`agent_writer` (SELECT + DML), never with `BYPASSRLS`, so the boundary holds no
+matter what SQL the LLM generates — RLS is the backstop against prompt injection.
 
-### 5b. Per-session write ceiling — `keycloak/init.py` + `broker/authz.py`
+`app.user_id` is pinned with the `SET LOCAL` utility statement rather than
+`set_config()`, and `set_config` is revoked from both agent roles
+(`postgres/init/01-schema.sql`), so model-generated SQL cannot move the subject
+from inside a query.
+
+### 5. Scoped delegation — `keycloak/init.py` + `broker/identity.py` + `agent/db.py`
+
+`keycloak-init` registers four optional client scopes: `finance:read` /
+`finance:write` (operation) and `svc:transactions` / `svc:payments` (service,
+each carrying an audience mapper). Each is assigned to exactly one per-service
+client — `finance-agent-transactions` gets `finance:read + svc:transactions`,
+`finance-agent-payments` gets `finance:write + svc:payments`. The broker mints via
+the matching client per tool call; the agent maps the granted `scope` to a DB role
++ transaction mode, and checks the `aud`. Because no client is allowed the other
+service's scopes, both service isolation and the read/write ceiling are enforced
+by Keycloak (`invalid_scope`), not merely by tool exposure.
+
+### 6. Per-session write ceiling — `keycloak/init.py` + `broker/authz.py`
+
 The per-client ceiling can't say "this session is read-only" (the payments client
 can always mint write). A **Keycloak Authorization-Services** policy adds a
 per-session ceiling: the user token carries a signed `session_purpose` claim (set
@@ -303,17 +358,14 @@ with. See [`docs/per-session-authorization.md`](docs/per-session-authorization.m
 `login --purpose read` while running the agent with `--allow-write` shows the
 live agent denied.
 
-### 5. Scoped delegation — `keycloak/init.py` + `broker/identity.py` + `agent/db.py`
+### 7. Intent binding — `broker/broker.py` + `postgres/init/04-approvals.sql`
 
-`keycloak-init` registers four optional client scopes: `finance:read` /
-`finance:write` (operation) and `svc:transactions` / `svc:payments` (service,
-each carrying an audience mapper). Each is assigned to exactly one per-service
-client — `finance-agent-transactions` gets `finance:read + svc:transactions`,
-`finance-agent-payments` gets `finance:write + svc:payments`. The agent mints via
-the matching client per tool call, maps the granted `scope` to a DB role +
-transaction mode, and checks the `aud`. Because no client is allowed the other
-service's scopes, both service isolation and the read/write ceiling are enforced
-by Keycloak (`invalid_scope`), not merely by tool exposure.
+A `finance:write` token says the agent may write payments; it does not say which
+one. Before issuing it, the broker asks the user to approve the concrete action
+and records those four fields in `payment_approvals` as its own database role. A
+**`RESTRICTIVE`** policy on `transactions` is AND-ed with the `pay` policy above,
+so an INSERT is accepted only when it matches an unconsumed, unexpired approval;
+a `SECURITY DEFINER` trigger consumes the row, making approvals single use.
 
 
 ## The agent holds no user token, and no blanket write authority
@@ -380,6 +432,7 @@ directly on the write path).
 | Postgres | `localhost:5432` (`postgres`/`postgres`)           |
 | Keycloak | `http://localhost:8080` (`admin`/`admin`)          |
 | SpiceDB  | `localhost:50051` (preshared key `supersecretkey`) |
+| Broker   | `broker:8000`, compose network only — deliberately not published |
 
 ## Troubleshooting
 
@@ -407,20 +460,30 @@ directly on the write path).
   Note: the scopes are registered at runtime rather than in the realm import
   because declaring `clientScopes` in an import replaces Keycloak's built-in
   default scopes (profile, email, …) that the user token relies on.
+- **`session handle rejected by broker`.** Handles live in the broker's memory, so
+  restarting it invalidates every open session. Run the `login` tool again.
+- **A payment hangs, then fails with `payment not approved in time`.** Nothing is
+  answering the approval prompt. Run `docker compose run --rm approver` in a second
+  terminal, or `--auto` for a scripted stand-in.
+- **`relation "payment_approvals" does not exist`.** The Postgres volume predates
+  `04-approvals.sql`, and init scripts only run on an empty data directory.
+  `docker compose down && docker compose up -d --build`.
 
 ## Project layout
 
 ```
 docker-compose.yml         wiring for all services
-postgres/init/             schema, RLS policies (view + manage), seed data
+postgres/init/             schema + roles, RLS policies (view/manage/pay), seed data,
+                           payment_approvals + the RESTRICTIVE intent policy (04)
 keycloak/realm-export.json realm, clients, users (fixed UUIDs)
-keycloak/init.py           one-shot: register finance:read / finance:write scopes
-spicedb/schema.zed         the authoritative authz model (view + manage)
+keycloak/init.py           one-shot: operation, service and purpose scopes; payment#execute
+spicedb/schema.zed         the authoritative authz model (view + manage + caveated pay)
 sync/                      bootstrap, Watch->Postgres worker, relctl, check (caveat)
-agent/                     Claude agent: JIT scoped identity, DB access, live SpiceDB check, tools
+broker/                    session broker: holds the user token, maps a tool to scopes,
+                           runs the per-session policy check, collects payment approvals
+                           (login.py opens a session, approve.py is the approval channel)
+agent/                     Claude agent: broker client, DB access, live SpiceDB check, tools
 FIXTURES.md                the identity mapping all three systems share
-broker/                    session broker: holds the user token, decides scopes,
-                           collects payment approvals (login.py, approve.py)
 demo-rls.sh                prove the RLS boundary without Claude
 demo-permission-change.sh  live-demo a SpiceDB grant/revoke propagating to RLS
 demo-scoped-tokens.sh      prove the operation + service dimensions and per-service clients

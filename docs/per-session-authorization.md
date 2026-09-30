@@ -26,7 +26,7 @@ ceiling does not help — the payments client can always mint write.
 
 Make the write ceiling a **per-session decision, evaluated by Keycloak's policy
 engine** against an un-forgeable session claim — not baked into static client
-config, and not merely enforced by which tools the orchestrator exposes.
+config, and not merely enforced by which tools the agent is given.
 
 ## Mechanism
 
@@ -65,7 +65,7 @@ config, and not merely enforced by which tools the orchestrator exposes.
 
 Token exchange re-mints a fresh token for the target client, so a login claim is
 not automatically present in the delegated token. The user (login) token reliably
-carries `session_purpose`, is held by the trusted orchestrator, and already lists
+carries `session_purpose`, is held by the broker, and already lists
 `finance-agent-payments` in its `aud` (via the portal audience mapper), so it is a
 valid requesting-party token for the payments resource server. The DB write
 authority still comes from the delegated token's `sub`; both share the same
@@ -90,7 +90,7 @@ the piece that catches "the client *could* write, but this session must not."
 |---|---|
 | purpose scopes + `session_purpose` mapper; payments authz (resource/scope/policy/permission) | `keycloak/init.py` |
 | login requests the purpose scope | `agent/identity.py` (`login(..., purpose=…)`) |
-| UMA decision request | `agent/authz.py` (`session_may_pay`) |
+| UMA decision request | `broker/authz.py` (`session_may_pay`) |
 | enforcement in the payment path | `broker/broker.py` (`authorize_payment`), before any token is issued |
 | demonstration (no API key) | `demo-session-purpose.sh` |
 

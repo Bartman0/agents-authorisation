@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session authorisation flow · Sequence</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:  #e8ebf2;
+      --color-ink:    #0d1b2e;
+      --color-muted:  #46566e;
+      --color-accent: #1b43d4;
+      --font-sans:    'Poppins', system-ui, sans-serif;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+
+    .frame { max-width: 1280px; width: 100%; }
+
+    .eyebrow {
+      font-size: 0.66rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: none;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+
+    h1 .accent { color: var(--color-accent); }
+
+    p.caption {
+      font-size: 0.8rem;
+      line-height: 1.6;
+      color: var(--color-muted);
+      max-width: 62ch;
+      margin-top: 1.25rem;
+      padding-top: 1rem;
+      border-top: 1px solid rgba(13,27,46,0.12);
+    }
+
+    svg { width: 100%; min-width: 1080px; display: block; }
+    .scroller { overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Sequence · Agent authorisation demo</p>
+    <h1>Session purpose is chosen at login, <span class="accent">enforced at every hop</span></h1>
+
+    <div class="scroller">
+    <svg viewBox="0 0 1280 920" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="session-authz-title session-authz-desc">
+      <title id="session-authz-title">Session authorisation flow, login to database write</title>
+      <desc id="session-authz-desc">The user logs in once and picks a session purpose, which Keycloak stamps on the token as a signed claim. For each tool call the agent exchanges that token for a narrowly scoped delegated token, then asks Keycloak whether this session may execute a payment at all. A read-write session continues to a SpiceDB permission check with the amount in context and finally to a Postgres write guarded by row level security, while a read-only session is refused before any database call is made.</desc>
+
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#46566e"/>
+        </marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#1b43d4"/>
+        </marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#24406e"/>
+        </marker>
+        <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polyline points="0 0, 8 3, 0 6" fill="none" stroke="#46566e" stroke-width="1.2"/>
+        </marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#e8ebf2"/>
+
+      <!-- =================================================================
+           LIFELINES: User 120 · Agent 380 · Keycloak 640 · SpiceDB 900 · Postgres 1160
+           ================================================================= -->
+      <line x1="120"  y1="128" x2="120"  y2="832" stroke="rgba(13,27,46,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="380"  y1="128" x2="380"  y2="832" stroke="rgba(13,27,46,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="640"  y1="128" x2="640"  y2="832" stroke="rgba(13,27,46,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="900"  y1="128" x2="900"  y2="832" stroke="rgba(13,27,46,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="1160" y1="128" x2="1160" y2="832" stroke="rgba(13,27,46,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+
+      <!-- =================================================================
+           ACTIVATION BARS
+           ================================================================= -->
+      <!-- Agent holds control from the moment the session starts -->
+      <rect x="376"  y="176" width="8" height="584" fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+      <!-- Keycloak: login grant -->
+      <rect x="636"  y="216" width="8" height="40"  fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+      <!-- Keycloak: token exchange -->
+      <rect x="636"  y="296" width="8" height="40"  fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+      <!-- Keycloak: per-session policy decision -->
+      <rect x="636"  y="376" width="8" height="104" fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+      <!-- Keycloak: same decision, deny branch -->
+      <rect x="636"  y="700" width="8" height="48"  fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+      <!-- SpiceDB check -->
+      <rect x="896"  y="516" width="8" height="40"  fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+      <!-- Postgres write -->
+      <rect x="1156" y="596" width="8" height="40"  fill="rgba(13,27,46,0.06)" stroke="#46566e" stroke-width="0.8"/>
+
+      <!-- =================================================================
+           M1: User → Agent  start the session and pick its purpose
+           ================================================================= -->
+      <line x1="120" y1="176" x2="376" y2="176" stroke="#46566e" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="176" y="156" width="144" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="248" y="166" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Log in · purpose readwrite</text>
+
+      <!-- M2: Agent → Keycloak  password grant carrying the purpose scope -->
+      <line x1="384" y1="216" x2="636" y2="216" stroke="#24406e" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="430" y="196" width="160" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="510" y="206" fill="#24406e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Grant + scope purpose:readwrite</text>
+
+      <!-- M3: Keycloak → Agent  user token with the signed claim -->
+      <line x1="636" y1="256" x2="388" y2="256" stroke="#46566e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="444" y="236" width="136" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="512" y="246" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">User token · session_purpose</text>
+
+      <!-- M4: Agent → Keycloak  token exchange, least privilege per tool call -->
+      <line x1="384" y1="296" x2="636" y2="296" stroke="#24406e" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="438" y="276" width="144" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="510" y="286" fill="#24406e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Exchange · finance:write only</text>
+
+      <!-- M5: Keycloak → Agent  short lived delegated token -->
+      <line x1="636" y1="336" x2="388" y2="336" stroke="#46566e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="440" y="316" width="144" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="512" y="326" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Delegated token · aud payments</text>
+
+      <!-- M6: Agent → Keycloak  may THIS session pay at all -->
+      <line x1="384" y1="376" x2="636" y2="376" stroke="#24406e" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="430" y="356" width="160" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="510" y="366" fill="#24406e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Policy decision · payment#execute</text>
+
+      <!-- =================================================================
+           ALT COMBINED FRAGMENT: spans Agent · Keycloak · SpiceDB · Postgres
+           ================================================================= -->
+      <rect x="352" y="408" width="856" height="392" rx="4"
+            fill="rgba(13,27,46,0.02)" stroke="rgba(13,27,46,0.22)" stroke-width="1"/>
+      <rect x="352" y="408" width="40" height="16" rx="2"
+            fill="#e8ebf2" stroke="rgba(13,27,46,0.22)" stroke-width="1"/>
+      <text x="372" y="420" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.12em">ALT</text>
+
+      <!-- Region 1 guard -->
+      <text x="364" y="444" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" letter-spacing="0.04em">[session_purpose = readwrite]</text>
+
+      <!-- M7: Keycloak → Agent  per-session ceiling passed -->
+      <line x1="636" y1="476" x2="388" y2="476" stroke="#46566e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="452" y="456" width="120" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="512" y="466" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Permit · session may pay</text>
+
+      <!-- M8: Agent → SpiceDB  amount in context -->
+      <line x1="384" y1="516" x2="896" y2="516" stroke="#24406e" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="568" y="496" width="144" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="640" y="506" fill="#24406e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">CheckPermission · pay 250 EUR</text>
+
+      <!-- M9: SpiceDB → Agent  within the caveated limit -->
+      <line x1="896" y1="556" x2="388" y2="556" stroke="#46566e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="572" y="536" width="140" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="642" y="546" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Has permission · under limit</text>
+
+      <!-- M10: Agent → Postgres  identity pinned, single statement -->
+      <line x1="384" y1="596" x2="1156" y2="596" stroke="#24406e" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="698" y="576" width="144" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="770" y="586" fill="#24406e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Set app.user_id · insert row</text>
+
+      <!-- M11: Postgres → Agent  headline success, RLS is the hard backstop -->
+      <line x1="1156" y1="636" x2="388" y2="636" stroke="#1b43d4" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+      <rect x="704" y="616" width="136" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="772" y="626" fill="#1b43d4" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">RLS pass · payment written</text>
+
+      <!-- alt region divider -->
+      <line x1="360" y1="672" x2="1200" y2="672"
+            stroke="rgba(13,27,46,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- Region 2 guard -->
+      <text x="364" y="704" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" letter-spacing="0.04em">[else · session_purpose = read]</text>
+
+      <!-- M12: Keycloak → Agent  refused by the per-session policy -->
+      <line x1="636" y1="740" x2="388" y2="740" stroke="#46566e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="452" y="720" width="120" height="12" rx="2" fill="#e8ebf2"/>
+      <text x="512" y="730" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.06em">Deny · read-only session</text>
+
+      <text x="364" y="776" fill="#6b7789" font-size="8" font-family="'Poppins', sans-serif" letter-spacing="0.04em">Agent stops here: no SpiceDB check, no SQL, nothing reaches the database.</text>
+
+      <!-- =================================================================
+           ACTOR BOXES: drawn after arrows
+           ================================================================= -->
+      <!-- User (input) -->
+      <rect x="40" y="72" width="160" height="56" rx="6" fill="#e8ebf2"/>
+      <rect x="40" y="72" width="160" height="56" rx="6" fill="rgba(70,86,110,0.10)" stroke="#6b7789" stroke-width="1"/>
+      <rect x="48" y="78" width="36" height="12" rx="2" fill="transparent" stroke="rgba(107,119,137,0.40)" stroke-width="0.8"/>
+      <text x="66"  y="87"  fill="#6b7789" font-size="7" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.08em">Human</text>
+      <text x="120" y="104" fill="#0d1b2e" font-size="12" font-weight="600" font-family="'Poppins', sans-serif" text-anchor="middle">User</text>
+      <text x="120" y="119" fill="#46566e" font-size="9" font-family="'Poppins', sans-serif" text-anchor="middle">Logs in once</text>
+
+      <!-- Agent (backend) -->
+      <rect x="300" y="72" width="160" height="56" rx="6" fill="#e8ebf2"/>
+      <rect x="300" y="72" width="160" height="56" rx="6" fill="#ffffff" stroke="#0d1b2e" stroke-width="1"/>
+      <rect x="308" y="78" width="28" height="12" rx="2" fill="transparent" stroke="rgba(13,27,46,0.30)" stroke-width="0.8"/>
+      <text x="322" y="87"  fill="#46566e" font-size="7" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.08em">App</text>
+      <text x="380" y="104" fill="#0d1b2e" font-size="12" font-weight="600" font-family="'Poppins', sans-serif" text-anchor="middle">Agent</text>
+      <text x="380" y="119" fill="#46566e" font-size="9" font-family="'Poppins', sans-serif" text-anchor="middle">Orchestrator</text>
+
+      <!-- Keycloak (focal) -->
+      <rect x="560" y="72" width="160" height="56" rx="6" fill="#e8ebf2"/>
+      <rect x="560" y="72" width="160" height="56" rx="6" fill="rgba(27,67,212,0.08)" stroke="#1b43d4" stroke-width="1"/>
+      <rect x="568" y="78" width="28" height="12" rx="2" fill="transparent" stroke="rgba(27,67,212,0.50)" stroke-width="0.8"/>
+      <text x="582" y="87"  fill="#1b43d4" font-size="7" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.08em">IdP</text>
+      <text x="640" y="104" fill="#0d1b2e" font-size="12" font-weight="600" font-family="'Poppins', sans-serif" text-anchor="middle">Keycloak</text>
+      <text x="640" y="119" fill="#46566e" font-size="9" font-family="'Poppins', sans-serif" text-anchor="middle">Realm finance-demo</text>
+
+      <!-- SpiceDB (backend) -->
+      <rect x="820" y="72" width="160" height="56" rx="6" fill="#e8ebf2"/>
+      <rect x="820" y="72" width="160" height="56" rx="6" fill="#ffffff" stroke="#0d1b2e" stroke-width="1"/>
+      <rect x="828" y="78" width="36" height="12" rx="2" fill="transparent" stroke="rgba(13,27,46,0.30)" stroke-width="0.8"/>
+      <text x="846" y="87"  fill="#46566e" font-size="7" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.08em">Authz</text>
+      <text x="900" y="104" fill="#0d1b2e" font-size="12" font-weight="600" font-family="'Poppins', sans-serif" text-anchor="middle">SpiceDB</text>
+      <text x="900" y="119" fill="#46566e" font-size="9" font-family="'Poppins', sans-serif" text-anchor="middle">Relationship graph</text>
+
+      <!-- Postgres (store) -->
+      <rect x="1080" y="72" width="160" height="56" rx="6" fill="#e8ebf2"/>
+      <rect x="1080" y="72" width="160" height="56" rx="6" fill="rgba(13,27,46,0.05)" stroke="#46566e" stroke-width="1"/>
+      <rect x="1088" y="78" width="32" height="12" rx="2" fill="transparent" stroke="rgba(70,86,110,0.40)" stroke-width="0.8"/>
+      <text x="1104" y="87"  fill="#46566e" font-size="7" font-family="'Poppins', sans-serif" text-anchor="middle" letter-spacing="0.08em">Data</text>
+      <text x="1160" y="104" fill="#0d1b2e" font-size="12" font-weight="600" font-family="'Poppins', sans-serif" text-anchor="middle">Postgres</text>
+      <text x="1160" y="119" fill="#46566e" font-size="9" font-family="'Poppins', sans-serif" text-anchor="middle">Row level security</text>
+
+      <!-- =================================================================
+           LEGEND
+           ================================================================= -->
+      <line x1="40" y1="856" x2="1240" y2="856" stroke="rgba(13,27,46,0.10)" stroke-width="0.8"/>
+      <text x="40" y="872" fill="#46566e" font-size="8" font-family="'Poppins', sans-serif" letter-spacing="0.18em">Legend</text>
+
+      <rect x="40" y="884" width="14" height="10" rx="2" fill="rgba(27,67,212,0.08)" stroke="#1b43d4" stroke-width="1"/>
+      <text x="60" y="892" fill="#46566e" font-size="8.5" font-family="'Poppins', sans-serif">Focal / success</text>
+
+      <rect x="200" y="880" width="28" height="18" rx="2" fill="rgba(13,27,46,0.02)" stroke="rgba(13,27,46,0.22)" stroke-width="1"/>
+      <text x="208" y="892" fill="#46566e" font-size="7" font-family="'Poppins', sans-serif">ALT</text>
+      <text x="236" y="892" fill="#46566e" font-size="8.5" font-family="'Poppins', sans-serif">Branch on the session claim</text>
+
+      <line x1="440" y1="888" x2="468" y2="888" stroke="#24406e" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <text x="476" y="892" fill="#46566e" font-size="8.5" font-family="'Poppins', sans-serif">Service call</text>
+
+      <line x1="600" y1="888" x2="628" y2="888" stroke="#46566e" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <text x="636" y="892" fill="#46566e" font-size="8.5" font-family="'Poppins', sans-serif">Return</text>
+
+      <line x1="720" y1="888" x2="748" y2="888" stroke="#1b43d4" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+      <text x="756" y="892" fill="#46566e" font-size="8.5" font-family="'Poppins', sans-serif">Headline success</text>
+    </svg>
+    </div>
+
+    <p class="caption">
+      Four gates stand between the user and the row: the purpose scope chosen at login
+      (<strong>agent/identity.py</strong>), the scope ceiling Keycloak puts on each per-service client,
+      the per-session policy decision (<strong>agent/authz.py</strong>, configured by <strong>keycloak/init.py</strong>),
+      and row level security in <strong>postgres/init/02-rls.sql</strong>, which stays the hard backstop.
+      The read path through <strong>query_transactions</strong> is the same shape without the Keycloak and
+      SpiceDB checks: a <strong>finance:read</strong> token, a SELECT-only role and a READ ONLY transaction.
+    </p>
+  </div>
+</body>
+</html>

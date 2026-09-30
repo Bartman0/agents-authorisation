@@ -14,6 +14,11 @@ could mint any token that authority allowed. The broker takes that away:
     "owned by trusted code inside the agent" — it is not in the agent at all.
   * The per-session policy check (`authz.session_may_pay`) lives HERE, because
     it needs the user token as its bearer credential.
+  * Payments are APPROVED here, out of band. The broker asks the user about the
+    concrete action, and on approval records it in `payment_approvals` as its
+    own database role. A RESTRICTIVE policy on `transactions` then refuses any
+    INSERT that does not match an unconsumed row, so a write token alone is not
+    enough: the agent can propose a payment but cannot authorise one.
 
 The handle is a bearer credential for this API and nothing else. Leaking it
 lets someone *propose* work under the session; it does not let them approve a
@@ -27,6 +32,8 @@ Endpoints (plain JSON over HTTP, internal to the compose network):
     POST   /sessions/{handle}/payments {account_id, amount_eur,
                                         counterparty, description}  -> {access_token, ...}
     DELETE /sessions/{handle}
+    GET    /approvals/pending                                       -> [{id, ...}]
+    POST   /approvals/{id}/decision   {approve}                     -> {decided}
 
 No response on any path ever contains the user token.
 """
@@ -34,12 +41,22 @@ import json
 import os
 import secrets
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import psycopg
 
 import authz
 import identity
 
 LISTEN_PORT = int(os.environ.get("BROKER_PORT", "8000"))
+
+# Seconds a payment request waits for a human decision before it is refused.
+APPROVAL_TIMEOUT = int(os.environ.get("BROKER_APPROVAL_TIMEOUT", "120"))
+# How long an approval stays usable. Matched to the delegated token TTL.
+APPROVAL_TTL = int(os.environ.get("BROKER_APPROVAL_TTL", "120"))
+# Scripted demos set this so they do not block on a human.
+AUTO_APPROVE = os.environ.get("BROKER_AUTO_APPROVE", "") == "1"
 
 TRANSACTIONS_SERVICE = "transactions-service"
 PAYMENTS_SERVICE = "payments-service"
@@ -100,6 +117,89 @@ class BrokerError(Exception):
         super().__init__(message)
         self.status = status
         self.payload = {"error": message, **extra}
+
+
+class PendingApproval:
+    """One payment waiting for a human. The agent's request blocks on `decided`."""
+
+    def __init__(self, session: Session, action: dict):
+        self.id = str(uuid.uuid4())
+        self.session = session
+        self.action = action
+        self.approved: bool | None = None
+        self.decided = threading.Event()
+
+    def public(self) -> dict:
+        """Exactly the fields the database will match on, plus who is asking.
+
+        The approver sees these and nothing else: no model-written prose, so the
+        prompt cannot describe one payment while another is recorded.
+        """
+        return {
+            "id": self.id,
+            "username": self.session.username,
+            "account_id": self.action["account_id"],
+            "amount_eur": self.action["amount_eur"],
+            "counterparty": self.action["counterparty"],
+            "description": self.action["description"],
+        }
+
+
+_PENDING: dict[str, PendingApproval] = {}
+_DB = None
+
+
+def _db():
+    """Lazy connection as the `broker` role. Only ever writes payment_approvals."""
+    global _DB
+    if _DB is None or _DB.closed:
+        _DB = psycopg.connect(
+            host=os.environ.get("PGHOST", "postgres"),
+            port=int(os.environ.get("PGPORT", "5432")),
+            dbname=os.environ.get("PGDATABASE", "finance"),
+            user=os.environ.get("BROKER_PGUSER", "broker"),
+            password=os.environ.get("BROKER_PGPASSWORD", "brokerpw"),
+            autocommit=True,
+        )
+    return _DB
+
+
+def _record_approval(pending: PendingApproval) -> str:
+    """Write the approved action so the database can hold the agent to it."""
+    action = pending.action
+    with _db().cursor() as cur:
+        cur.execute(
+            "INSERT INTO payment_approvals"
+            " (id, subject_id, account_id, amount, counterparty, description, expires_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s))",
+            (
+                pending.id,
+                pending.session.user_id,
+                action["account_id"],
+                action["amount_eur"],
+                action["counterparty"],
+                action["description"],
+                APPROVAL_TTL,
+            ),
+        )
+    return pending.id
+
+
+def list_pending() -> list:
+    with _LOCK:
+        return [p.public() for p in _PENDING.values() if p.approved is None]
+
+
+def decide(approval_id: str, body: dict) -> dict:
+    with _LOCK:
+        pending = _PENDING.get(approval_id)
+    if pending is None:
+        raise BrokerError(404, "unknown approval id")
+    if pending.decided.is_set():
+        raise BrokerError(409, "already decided")
+    pending.approved = bool(body.get("approve"))
+    pending.decided.set()
+    return {"decided": True, "approved": pending.approved}
 
 
 def create_session(body: dict) -> dict:
@@ -166,11 +266,24 @@ def issue_token(handle: str, body: dict) -> dict:
 
 
 def authorize_payment(handle: str, body: dict) -> dict:
-    """The write path: per-session policy decision, then a scoped token."""
+    """The write path: per-session policy, then the user's approval, then a token.
+
+    The token this returns is worth nothing on its own. The INSERT it enables is
+    accepted only because `_record_approval` wrote a matching row first.
+    """
     session = _session(handle)
     missing = [f for f in PAYMENT_FIELDS if body.get(f) in (None, "")]
     if missing:
         raise BrokerError(400, f"missing payment fields: {', '.join(missing)}")
+    try:
+        action = {
+            "account_id": int(body["account_id"]),
+            "amount_eur": round(abs(float(body["amount_eur"])), 2),
+            "counterparty": str(body["counterparty"]),
+            "description": str(body["description"]),
+        }
+    except (TypeError, ValueError) as exc:
+        raise BrokerError(400, f"malformed payment fields: {exc}") from exc
 
     allowed, reason = authz.session_may_pay(session.user_token)
     print(f"[broker] {session.username}: per-session policy -> "
@@ -178,7 +291,30 @@ def authorize_payment(handle: str, body: dict) -> dict:
     if not allowed:
         raise BrokerError(403, reason, stage="per-session-policy")
 
-    return _mint(session, "make_payment", body.get("task"))
+    pending = PendingApproval(session, action)
+    summary = (f"pay {action['amount_eur']:.2f} EUR from account {action['account_id']} "
+               f"to {action['counterparty']} — \"{action['description']}\"")
+    if AUTO_APPROVE:
+        print(f"[broker] {session.username}: AUTO-APPROVED {summary}", flush=True)
+        pending.approved = True
+    else:
+        with _LOCK:
+            _PENDING[pending.id] = pending
+        print(f"[broker] {session.username}: awaiting approval for {summary} "
+              f"(id={pending.id})", flush=True)
+        pending.decided.wait(timeout=APPROVAL_TIMEOUT)
+        with _LOCK:
+            _PENDING.pop(pending.id, None)
+        if pending.approved is None:
+            raise BrokerError(403, "payment not approved in time", stage="user-approval")
+        if not pending.approved:
+            raise BrokerError(403, "payment denied by the user", stage="user-approval")
+        print(f"[broker] {session.username}: APPROVED {summary}", flush=True)
+
+    _record_approval(pending)
+    granted = _mint(session, "make_payment", body.get("task"))
+    granted["approval_id"] = pending.id
+    return granted
 
 
 def end_session(handle: str) -> dict:
@@ -196,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter than the default access log
         pass
 
-    def _respond(self, status: int, payload: dict) -> None:
+    def _respond(self, status: int, payload) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -217,6 +353,10 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in self.path.split("?")[0].strip("/").split("/") if p]
         if parts == ["health"] and method == "GET":
             return lambda: {"ok": True}
+        if parts == ["approvals", "pending"] and method == "GET":
+            return list_pending
+        if len(parts) == 3 and parts[0] == "approvals" and parts[2] == "decision" and method == "POST":
+            return lambda: decide(parts[1], self._body())
         if parts == ["sessions"] and method == "POST":
             return lambda: create_session(self._body())
         if len(parts) == 2 and parts[0] == "sessions":
@@ -256,7 +396,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
+    mode = "AUTO-APPROVE (scripted demo)" if AUTO_APPROVE else "awaiting human approval per payment"
     print(f"[broker] listening on :{LISTEN_PORT} — the agent never sees a user token", flush=True)
+    print(f"[broker] payment approvals: {mode}", flush=True)
     server.serve_forever()
 
 

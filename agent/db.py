@@ -9,10 +9,16 @@ Two enforcement points, both driven by the *token's granted scope*:
 Row visibility on top of that is RLS: reads see rows the user may `view`,
 writes touch only rows the user may `manage` (owners). Every statement runs in
 a transaction that pins `app.user_id` (SET LOCAL) to the token's `sub`.
+
+`app.user_id` is set with the SET LOCAL utility statement rather than
+`set_config()`, because a function call can be embedded in the model-generated
+SQL this module executes, and a utility statement cannot. `set_config` is
+revoked from both agent roles in 01-schema.sql.
 """
 import os
 
 import psycopg
+from psycopg import sql as pgsql
 
 _CONNS: dict[str, psycopg.Connection] = {}
 
@@ -74,7 +80,7 @@ def run_sql(sql: str, user_id: str, may_write: bool, params=None, limit: int = 2
         with conn.cursor() as cur:
             if not may_write:
                 cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute("SELECT set_config('app.user_id', %s, true)", (user_id,))
+            cur.execute(pgsql.SQL("SET LOCAL app.user_id = {}").format(pgsql.Literal(user_id)))
             cur.execute(sql, params)
             if cur.description:
                 columns = [d.name for d in cur.description]

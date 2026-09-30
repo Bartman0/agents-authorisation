@@ -27,7 +27,7 @@ rule() { printf "\033[2m%s\033[0m\n" "------------------------------------------
 show_carol_rls() {
   docker compose exec -T -e PGPASSWORD=agentpw postgres \
     psql -U agent -d finance -q -v ON_ERROR_STOP=1 <<SQL
-SELECT set_config('app.user_id', '$CAROL', false);
+SET app.user_id = '$CAROL';
 SELECT id, name, iban FROM accounts ORDER BY id;
 SQL
 }

@@ -8,10 +8,11 @@
 --      `resource_access` table, no network call to SpiceDB per query.
 --
 -- Identity is carried in the `app.user_id` session variable, which the agent
--- sets (via SET LOCAL / set_config) to the `sub` of the *delegated* token it
--- obtained from Keycloak on behalf of the human user. If the variable is unset,
--- current_setting(..., true) returns NULL and every policy denies -> secure
--- default.
+-- pins with the SET LOCAL utility statement to the `sub` of the *delegated*
+-- token the broker obtained on behalf of the human user. If the variable is
+-- unset, current_setting(..., true) returns NULL and every policy denies ->
+-- secure default. `set_config()` is revoked from the agent roles (01-schema)
+-- so model-generated SQL cannot move the subject from inside a query.
 -- =============================================================================
 
 ALTER TABLE accounts     ENABLE ROW LEVEL SECURITY;

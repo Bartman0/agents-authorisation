@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY identity.py authz.py broker.py login.py ./
+COPY identity.py authz.py broker.py login.py approve.py ./
 
 ENTRYPOINT ["python", "broker.py"]

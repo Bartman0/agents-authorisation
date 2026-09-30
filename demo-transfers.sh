@@ -22,6 +22,14 @@
 # =============================================================================
 set -euo pipefail
 
+# Payments now need the user's approval, recorded in payment_approvals before
+# the INSERT is allowed. Run a scripted stand-in for the user in the background
+# so this demo does not block; a real session uses `docker compose run approver`
+# in a second terminal and answers each prompt.
+approver_id=$(docker compose run -d --rm approver --auto)
+trap 'docker rm -f "$approver_id" >/dev/null 2>&1 || true' EXIT
+sleep 1
+
 docker compose run --rm --no-deps -T --entrypoint python agent - <<'PY' 2>&1 | sed '/^ *Container /d'
 import os, time
 import psycopg

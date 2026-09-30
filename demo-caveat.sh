@@ -14,6 +14,14 @@
 # =============================================================================
 set -euo pipefail
 
+# Payments now need the user's approval, recorded in payment_approvals before
+# the INSERT is allowed. Run a scripted stand-in for the user in the background
+# so this demo does not block; a real session uses `docker compose run approver`
+# in a second terminal and answers each prompt.
+approver_id=$(docker compose run -d --rm approver --auto)
+trap 'docker rm -f "$approver_id" >/dev/null 2>&1 || true' EXIT
+sleep 1
+
 echo "=== Materialized pay grants (note max_amount) ==="
 docker compose exec -T -e PGPASSWORD=postgres postgres psql -U postgres -d finance -c \
   "SELECT subject_id, resource_id AS account, permission, max_amount

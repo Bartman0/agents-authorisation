@@ -12,6 +12,10 @@
 --                     Used only when the agent holds a `finance:write` token.
 --                     Writes are still bounded by the `manage` RLS policies, so
 --                     a write token only touches rows the user can *manage*.
+--   * broker       — the session broker. Writes `payment_approvals` (04) and
+--                     nothing else: it never touches business data, and it has
+--                     no BYPASSRLS. It is the only role entitled to record that
+--                     a user approved a specific payment.
 --   * syncer       — the SpiceDB->Postgres materialization worker. Owns the
 --                     contents of `resource_access`; reads business data only to
 --                     enumerate resources.
@@ -23,6 +27,7 @@
 
 CREATE ROLE agent        LOGIN PASSWORD 'agentpw';
 CREATE ROLE agent_writer LOGIN PASSWORD 'agentwriterpw';
+CREATE ROLE broker       LOGIN PASSWORD 'brokerpw';
 -- syncer is trusted infrastructure: it must read every account to compute the
 -- authorization projection, so it bypasses RLS. It never serves user queries.
 -- Neither agent role gets BYPASSRLS — that is the boundary.
@@ -86,7 +91,7 @@ CREATE INDEX resource_access_lookup_idx
 -- ---------------------------------------------------------------------------
 -- Privileges
 -- ---------------------------------------------------------------------------
-GRANT USAGE ON SCHEMA public TO agent, agent_writer, syncer;
+GRANT USAGE ON SCHEMA public TO agent, agent_writer, broker, syncer;
 
 -- Read agent: SELECT on everything it might query. RLS still filters the rows.
 GRANT SELECT ON organizations, accounts, transactions, resource_access TO agent;
@@ -100,3 +105,15 @@ GRANT USAGE, SELECT ON SEQUENCE transactions_id_seq TO agent_writer;
 -- Syncer: owns resource_access; reads accounts to enumerate resources.
 GRANT SELECT, INSERT, UPDATE, DELETE ON resource_access TO syncer;
 GRANT SELECT ON accounts, organizations TO syncer;
+
+-- ---------------------------------------------------------------------------
+-- Identity must be a utility statement, not a function call.
+--
+-- `app.user_id` is the subject every RLS policy keys on, so the agent roles must
+-- not be able to move it from inside a query. `SET LOCAL app.user_id = '...'`
+-- cannot appear inside a SELECT; `set_config()` can, and the agent's read path
+-- executes model-generated SQL that only has to start with SELECT or WITH.
+-- Revoking the function closes that door; db.py uses SET LOCAL instead.
+-- ---------------------------------------------------------------------------
+REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) TO syncer, broker;

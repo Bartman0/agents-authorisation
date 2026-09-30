@@ -145,6 +145,9 @@ services:
     entrypoint: ["python", "approve.py"]
     environment:
       BROKER_URL: http://broker:8000
+      # An --auto approver stops itself after this many seconds, so one orphaned
+      # by a SIGKILL cannot outlive its demo. Overridden by --max-age.
+      APPROVER_MAX_AGE: ${APPROVER_MAX_AGE:-}
     depends_on:
       - broker
     profiles: ["cli"]

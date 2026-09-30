@@ -12,6 +12,13 @@ What it prints for each request comes straight from the four columns the
 database will match on — account, amount, counterparty, description. There is
 no model-written prose in the prompt, so the payment you read is bit-for-bit
 the payment that can be written.
+
+An `--auto` approver stops on its own after `--max-age` seconds (10 minutes by
+default). The demo scripts that start one also remove it from a trap, but a
+trap cannot run if the script is killed with SIGKILL, and an auto-approver that
+outlives its demo is exactly the thing this design exists to prevent: it would
+sit there approving whatever the next agent proposes. The deadline is inside
+the approver, so nothing has to survive for it to take effect.
 """
 import argparse
 import os
@@ -21,6 +28,10 @@ import time
 import requests
 
 BROKER_URL = os.environ.get("BROKER_URL", "http://broker:8000")
+
+# How long an --auto approver runs before stopping itself. Long enough for any
+# demo in this repo, short enough that an orphan is not a standing risk.
+AUTO_MAX_AGE = float(os.environ.get("APPROVER_MAX_AGE") or 600)
 
 
 def decide(approval_id: str, approve: bool) -> None:
@@ -57,12 +68,28 @@ def main() -> None:
         help="Approve everything without prompting. For scripted demos that stand in for the "
         "user — never for anything you would call a security control.",
     )
+    parser.add_argument(
+        "--max-age",
+        type=float,
+        default=None,
+        help="Stop after this many seconds. 0 means no limit. Defaults to 600 with --auto, so an "
+        "auto-approver cannot outlive the script that started it, and to no limit otherwise.",
+    )
     args = parser.parse_args()
 
+    max_age = args.max_age
+    if max_age is None:
+        max_age = AUTO_MAX_AGE if args.auto else 0
+
     how = "auto-approving (scripted stand-in for the user)" if args.auto else "prompting per payment"
-    print(f"Watching {BROKER_URL} for payment approvals, {how}. Ctrl-C to stop.", flush=True)
+    deadline = f", stopping after {max_age:g}s" if max_age else ""
+    print(f"Watching {BROKER_URL} for payment approvals, {how}{deadline}. Ctrl-C to stop.", flush=True)
+    started = time.monotonic()
     seen: set[str] = set()
     while True:
+        if max_age and time.monotonic() - started >= max_age:
+            print(f"Stopping: reached the {max_age:g}s limit.", flush=True)
+            return
         try:
             resp = requests.get(f"{BROKER_URL}/approvals/pending", timeout=15)
             resp.raise_for_status()
